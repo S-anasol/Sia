@@ -48,6 +48,10 @@ type (
 	StorageGET struct {
 		Folders []modules.StorageFolderMetadata `json:"folders"`
 	}
+
+	StorageObligationsGET struct {
+		Obligations []modules.StorageObligation `json:"obligations"`
+	}
 )
 
 // folderIndex determines the index of the storage folder with the provided
@@ -367,4 +371,11 @@ func (api *API) storageSectorsDeleteHandler(w http.ResponseWriter, req *http.Req
 		return
 	}
 	WriteSuccess(w)
+}
+
+// storageobligationsHandler handles the call to get host contracts information
+func (api *API) storageobligationsHandler(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	WriteJSON(w, StorageObligationsGET{
+		Obligations: api.host.StorageObligations(),
+	})
 }
