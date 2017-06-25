@@ -119,6 +119,17 @@ type (
 		ProofConstructed    bool   `json:"proofconstructed"`
 		ProofConfirmed      bool   `json:"proofconfirmed"`
 		ObligationStatus    uint64 `json:"obligationstatus"`
+
+		ContractCost             types.Currency `json:"contractcost"`
+		LockedCollateral         types.Currency `json:"lockedcollateral"`
+		PotentialDownloadRevenue types.Currency `json:"potentialdownloadrevenue"`
+		PotentialStorageRevenue  types.Currency `json:"potentialstoragerevenue"`
+		PotentialUploadRevenue   types.Currency `json:"potentialuploadrevenue"`
+		RiskedCollateral         types.Currency `json:"riskedcollateral"`
+		TransactionFeesAdded     types.Currency `json:"transactionfeesadded"`
+
+		OriginTransactionSet   []types.Transaction `json:"origintransactionset"`
+		RevisionTransactionSet []types.Transaction `json:"revisiontransactionset"`
 	}
 
 	// HostWorkingStatus reports the working state of a host. Can be one of
