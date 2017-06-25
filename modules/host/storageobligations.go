@@ -878,6 +878,17 @@ func (h *Host) StorageObligations() (sos []modules.StorageObligation) {
 				ProofConstructed:    so.ProofConstructed,
 				ProofConfirmed:      so.ProofConfirmed,
 				ObligationStatus:    uint64(so.ObligationStatus),
+
+				ContractCost:             so.ContractCost
+				LockedCollateral:         so.LockedCollateral
+				PotentialDownloadRevenue: so.PotentialDownloadRevenue
+				PotentialStorageRevenue:  so.PotentialStorageRevenue
+				PotentialUploadRevenue:   so.PotentialUploadRevenue
+				RiskedCollateral:         so.RiskedCollateral
+				TransactionFeesAdded:     so.TransactionFeesAdded
+
+				OriginTransactionSet:   so.OriginTransactionSet
+				RevisionTransactionSet: so.RevisionTransactionSet
 			}
 			sos = append(sos, mso)
 			return nil
