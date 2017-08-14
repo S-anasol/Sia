@@ -76,7 +76,7 @@ func New(cs modules.ConsensusSet, persistDir string) (*Explorer, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	
 	err = cs.ConsensusSetSubscribe(e, recentChange)
 	if err != nil {
 		// TODO: restart from 0
