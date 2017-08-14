@@ -153,12 +153,14 @@ func (tp *TransactionPool) initPersist() error {
 	// Get the most recent block height
 	bh, err := tp.getBlockHeight(tp.dbTx)
 	if err != nil {
+		tp.log.Println("Block height is reporting as zero, setting up to subscribe from the beginning.")
 		err = tp.putBlockHeight(tp.dbTx, types.BlockHeight(0))
 		if err != nil {
 			return build.ExtendErr("unable to initialize the block height in the tpool", err)
 		}
 		err = tp.putRecentConsensusChange(tp.dbTx, modules.ConsensusChangeBeginning)
 	} else {
+		tp.log.Debugln("Transaction pool is loading from height:", bh)
 		tp.blockHeight = bh
 	}
 	if err != nil {
@@ -178,15 +180,16 @@ func (tp *TransactionPool) initPersist() error {
 	}
 
 	// Subscribe to the consensus set using the most recent consensus change.
-	err = tp.consensusSet.ConsensusSetSubscribe(tp, cc)
+	err = tp.consensusSet.ConsensusSetSubscribe(tp, cc, tp.tg.StopChan())
 	if err == modules.ErrInvalidConsensusChangeID {
+		tp.log.Println("Invalid consensus change loaded; resetting. This can take a while.")
 		// Reset and rescan because the consensus set does not recognize the
 		// provided consensus change id.
 		resetErr := tp.resetDB(tp.dbTx)
 		if resetErr != nil {
 			return resetErr
 		}
-		freshScanErr := tp.consensusSet.ConsensusSetSubscribe(tp, modules.ConsensusChangeBeginning)
+		freshScanErr := tp.consensusSet.ConsensusSetSubscribe(tp, modules.ConsensusChangeBeginning, tp.tg.StopChan())
 		if freshScanErr != nil {
 			return freshScanErr
 		}

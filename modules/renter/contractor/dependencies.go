@@ -11,7 +11,7 @@ import (
 // interface possible makes it easier to mock these dependencies in testing.
 type (
 	consensusSet interface {
-		ConsensusSetSubscribe(modules.ConsensusSetSubscriber, modules.ConsensusChangeID) error
+		ConsensusSetSubscribe(modules.ConsensusSetSubscriber, modules.ConsensusChangeID, <-chan struct{}) error
 		Synced() bool
 		Unsubscribe(modules.ConsensusSetSubscriber)
 	}
@@ -49,7 +49,10 @@ type (
 		AllHosts() []modules.HostDBEntry
 		ActiveHosts() []modules.HostDBEntry
 		Host(types.SiaPublicKey) (modules.HostDBEntry, bool)
+		IncrementSuccessfulInteractions(key types.SiaPublicKey)
+		IncrementFailedInteractions(key types.SiaPublicKey)
 		RandomHosts(n int, exclude []types.SiaPublicKey) []modules.HostDBEntry
+		ScoreBreakdown(modules.HostDBEntry) modules.HostScoreBreakdown
 	}
 
 	persister interface {
