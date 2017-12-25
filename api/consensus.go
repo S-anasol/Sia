@@ -63,8 +63,13 @@ type ConsensusTransaction struct {
 // ConsensusBlockGET is the object returned by a GET request to
 // /consensus/block.
 type ConsensusBlock struct {
-	BlockHeight types.BlockHeight `json:"blockheight"`
-	BlockHeader types.BlockHeader `json:"blockheader"`
+    BlockID             types.BlockID                    `json:"id"`
+	BlockHeight         types.BlockHeight                `json:"blockheight"`
+	BlockHeader         types.BlockHeader                `json:"blockheader"`
+	Target              types.Target                     `json:"target"`
+	Difficulty          types.Currency                   `json:"difficulty"`
+    TotalCoins          types.Currency                   `json:"totalcoins"`
+    EstimatedHashrate   types.Currency                   `json:"estimatedhashrate"`
 
 	MinerPayouts map[string]types.SiacoinOutput  `json:"minerpayouts"`
 	Transactions map[string]ConsensusTransaction `json:"transactions"`
@@ -231,10 +236,43 @@ func (api *API) consensusBlocksHandler(w http.ResponseWriter, req *http.Request,
 			ArbitraryData: txn.ArbitraryData,
 		}
 	}
+
+    cbid := block.ID()
+	currentTarget, _ := api.cs.ChildTarget(cbid)
+
+    var estimatedHashrate types.Currency
+    var hashrateEstimationBlocks types.BlockHeight
+    // hashrateEstimationBlocks is the number of blocks that are used to
+	// estimate the current hashrate.
+	hashrateEstimationBlocks = 200 // 33 hours
+	if height > hashrateEstimationBlocks  {
+		var totalDifficulty = currentTarget
+		var oldestTimestamp types.Timestamp
+		for i := types.BlockHeight(1); i < hashrateEstimationBlocks; i++ {
+			b, exists := api.cs.BlockAtHeight(height - i)
+			if !exists {
+				panic(fmt.Sprint("ConsensusSet is missing block at height", height-hashrateEstimationBlocks))
+			}
+			target, exists := api.cs.ChildTarget(b.ParentID)
+			if !exists {
+				panic(fmt.Sprint("ConsensusSet is missing target of known block", b.ParentID))
+			}
+			totalDifficulty = totalDifficulty.AddDifficulties(target)
+			oldestTimestamp = b.Timestamp
+		}
+		secondsPassed := block.Timestamp - oldestTimestamp
+		estimatedHashrate = totalDifficulty.Difficulty().Div64(uint64(secondsPassed))
+	}
+
 	WriteJSON(w, ConsensusBlock{
+		BlockID:  block.ID(),
 		BlockHeight:  height,
 		BlockHeader:  block.Header(),
 		Transactions: ct,
 		MinerPayouts: minerpayouts,
+        Difficulty: currentTarget.Difficulty(),
+        Target: currentTarget,
+        TotalCoins: types.CalculateNumSiacoins(height),
+        EstimatedHashrate: estimatedHashrate,
 	})
 }
