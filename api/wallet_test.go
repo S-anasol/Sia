@@ -424,7 +424,10 @@ func TestIntegrationWalletSweepSeedPOST(t *testing.T) {
 	}
 	addr, _ := w.NextAddress()
 	st.wallet.SendSiacoins(types.SiacoinPrecision.Mul64(100), addr.UnlockHash())
-	st.miner.AddBlock()
+	_, err = st.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	seed, _, _ := w.PrimarySeed()
 	seedStr, _ := modules.SeedToString(seed, "english")
@@ -443,7 +446,10 @@ func TestIntegrationWalletSweepSeedPOST(t *testing.T) {
 	}
 
 	// Add a block so that the sweep transaction is processed
-	st.miner.AddBlock()
+	_, err = st.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Sweep again; should find no coins. An error will be returned because
 	// the found coins cannot cover the transaction fee.
@@ -476,7 +482,10 @@ func TestIntegrationWalletLoadSeedPOST(t *testing.T) {
 	defer st.panicClose()
 	// Mine blocks until the wallet has confirmed money.
 	for i := types.BlockHeight(0); i <= types.MaturityDelay; i++ {
-		st.miner.AddBlock()
+		_, err = st.miner.AddBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Create a wallet to load coins from.
@@ -499,7 +508,10 @@ func TestIntegrationWalletLoadSeedPOST(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := types.BlockHeight(0); i <= types.MaturityDelay; i++ {
-		m.AddBlock()
+		_, err = m.AddBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Record starting balances.
@@ -589,7 +601,10 @@ func TestWalletTransactionGETid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.miner.AddBlock()
+	_, err = st.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var wtgid2 WalletTransactionGETid
 	err = st.getAPI(fmt.Sprintf("/wallet/transaction/%s", txns[1].ID()), &wtgid2)
@@ -663,7 +678,7 @@ func TestWalletTransactionGETid(t *testing.T) {
 			t.Fatal("transaction should have an input")
 		}
 		if len(txn.Outputs) < 1 {
-			t.Fatal("transaciton should have outputs")
+			t.Fatal("transactions should have outputs")
 		}
 		for _, input := range txn.Inputs {
 			if input.Value.IsZero() {
@@ -722,7 +737,7 @@ func TestWalletTransactionGETid(t *testing.T) {
 			t.Fatal("transaction should have an input")
 		}
 		if len(txn.Outputs) < 1 {
-			t.Fatal("transaciton should have outputs")
+			t.Fatal("transactions should have outputs")
 		}
 		for _, input := range txn.Inputs {
 			if input.Value.IsZero() {
@@ -760,7 +775,7 @@ func TestWalletTransactionGETid(t *testing.T) {
 			t.Fatal("transaction should have an input")
 		}
 		if len(txn.Outputs) < 1 {
-			t.Fatal("transaciton should have outputs")
+			t.Fatal("transactions should have outputs")
 		}
 		for _, input := range txn.Inputs {
 			if input.Value.IsZero() {
@@ -1434,5 +1449,28 @@ func TestWalletSiacoins(t *testing.T) {
 		if !wg.ConfirmedSiacoinBalance.Equals(sendAmount) {
 			t.Errorf("wallet %d should have %v coins, has %v", i+2, sendAmount, wg.ConfirmedSiacoinBalance)
 		}
+	}
+}
+
+// TestWalletGETDust tests the consistency of dustthreshold field in /wallet
+func TestWalletGETDust(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+	t.Parallel()
+	st, err := createServerTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg WalletGET
+	err = st.getAPI("/wallet", &wg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dt := st.wallet.DustThreshold()
+	if !dt.Equals(wg.DustThreshold) {
+		t.Fatal("dustThreshold mismatch")
 	}
 }

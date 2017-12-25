@@ -16,6 +16,19 @@ import (
 )
 
 var (
+	hostAnnounceCmd = &cobra.Command{
+		Use:   "announce",
+		Short: "Announce yourself as a host",
+		Long: `Announce yourself as a host on the network.
+Announcing will also configure the host to start accepting contracts.
+You can revert this by running:
+	siac host config acceptingcontracts false
+You may also supply a specific address to be announced, e.g.:
+	siac host announce my-host-domain.com:9001
+Doing so will override the standard connectivity checks.`,
+		Run: hostannouncecmd,
+	}
+
 	hostCmd = &cobra.Command{
 		Use:   "host",
 		Short: "Perform host actions",
@@ -59,30 +72,17 @@ To configure the host to accept new contracts, set acceptingcontracts to true:
 		Run: wrap(hostconfigcmd),
 	}
 
-	hostAnnounceCmd = &cobra.Command{
-		Use:   "announce",
-		Short: "Announce yourself as a host",
-		Long: `Announce yourself as a host on the network.
-Announcing will also configure the host to start accepting contracts.
-You can revert this by running:
-	siac host config acceptingcontracts false
-You may also supply a specific address to be announced, e.g.:
-	siac host announce my-host-domain.com:9001
-Doing so will override the standard connectivity checks.`,
-		Run: hostannouncecmd,
+	hostFolderAddCmd = &cobra.Command{
+		Use:   "add [path] [size]",
+		Short: "Add a storage folder to the host",
+		Long:  "Add a storage folder to the host, specifying how much data it should store",
+		Run:   wrap(hostfolderaddcmd),
 	}
 
 	hostFolderCmd = &cobra.Command{
 		Use:   "folder",
 		Short: "Add, remove, or resize a storage folder",
 		Long:  "Add, remove, or resize a storage folder.",
-	}
-
-	hostFolderAddCmd = &cobra.Command{
-		Use:   "add [path] [size]",
-		Short: "Add a storage folder to the host",
-		Long:  "Add a storage folder to the host, specifying how much data it should store",
-		Run:   wrap(hostfolderaddcmd),
 	}
 
 	hostFolderRemoveCmd = &cobra.Command{
@@ -283,6 +283,16 @@ RPC Stats:
 			currencyUnits(totalRevenue))
 	}
 
+	// if wallet is locked print warning
+	walletstatus := new(api.WalletGET)
+	walleterr := getAPI("/wallet", walletstatus)
+	if walleterr != nil {
+		fmt.Print("\nWarning:\n	Could not get wallet status. A working wallet is needed in order to operate your host. Error: ")
+		fmt.Println(walleterr)
+	} else if !walletstatus.Unlocked {
+		fmt.Println("\nWarning:\n	Your wallet is locked. You must unlock your wallet for the host to function properly.")
+	}
+
 	fmt.Println("\nStorage Folders:")
 
 	// display storage folder info
@@ -362,13 +372,19 @@ func hostconfigcmd(param, value string) {
 	if err != nil {
 		die("Could not update host settings:", err)
 	}
+	fmt.Println("Host settings updated.")
+
+	// get the estimated conversion rate.
 	var eg api.HostEstimateScoreGET
 	err = getAPI(fmt.Sprintf("/host/estimatescore?%v=%v", param, value), &eg)
 	if err != nil {
+		if err.Error() == "cannot call /host/estimatescore without the renter module" {
+			// score estimate requires the renter module
+			return
+		}
 		die("could not get host score estimate:", err)
 	}
 	fmt.Printf("Estimated conversion rate: %v%%\n", eg.ConversionRate)
-	fmt.Println("Host settings updated.")
 }
 
 // hostannouncecmd is the handler for the command `siac host announce`.

@@ -94,13 +94,6 @@ var (
 		Version: "0.5.2",
 	}
 
-	// persistMetadata is the header that gets written to the persist file, and is
-	// used to recognize other persist files.
-	persistMetadata = persist.Metadata{
-		Header:  "Sia Host",
-		Version: "1.2.0",
-	}
-
 	// errHostClosed gets returned when a call is rejected due to the host
 	// having been closed.
 	errHostClosed = errors.New("call is disabled because the host is closed")
@@ -109,6 +102,13 @@ var (
 	errNilCS     = errors.New("host cannot use a nil state")
 	errNilTpool  = errors.New("host cannot use a nil transaction pool")
 	errNilWallet = errors.New("host cannot use a nil wallet")
+
+	// persistMetadata is the header that gets written to the persist file, and is
+	// used to recognize other persist files.
+	persistMetadata = persist.Metadata{
+		Header:  "Sia Host",
+		Version: "1.2.0",
+	}
 )
 
 // A Host contains all the fields necessary for storing files for clients and
@@ -116,14 +116,13 @@ var (
 type Host struct {
 	// RPC Metrics - atomic variables need to be placed at the top to preserve
 	// compatibility with 32bit systems. These values are not persistent.
-	atomicDownloadCalls       uint64
-	atomicErroredCalls        uint64
-	atomicFormContractCalls   uint64
-	atomicRenewCalls          uint64
-	atomicReviseCalls         uint64
-	atomicRecentRevisionCalls uint64
-	atomicSettingsCalls       uint64
-	atomicUnrecognizedCalls   uint64
+	atomicDownloadCalls     uint64
+	atomicErroredCalls      uint64
+	atomicFormContractCalls uint64
+	atomicRenewCalls        uint64
+	atomicReviseCalls       uint64
+	atomicSettingsCalls     uint64
+	atomicUnrecognizedCalls uint64
 
 	// Error management. There are a few different types of errors returned by
 	// the host. These errors intentionally not persistent, so that the logging
@@ -181,7 +180,15 @@ type Host struct {
 // from the wallet. That may fail due to the wallet being locked, in which case
 // an error is returned.
 func (h *Host) checkUnlockHash() error {
-	if h.unlockHash == (types.UnlockHash{}) {
+	addrs := h.wallet.AllAddresses()
+	hasAddr := false
+	for _, addr := range addrs {
+		if h.unlockHash == addr {
+			hasAddr = true
+			break
+		}
+	}
+	if !hasAddr || h.unlockHash == (types.UnlockHash{}) {
 		uc, err := h.wallet.NextAddress()
 		if err != nil {
 			return err

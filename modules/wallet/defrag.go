@@ -12,9 +12,16 @@ var (
 	errDefragNotNeeded = errors.New("defragging not needed, wallet is already sufficiently defragged")
 )
 
-// createDefragTransaction creates a transaction that spends multiple existing
+// managedCreateDefragTransaction creates a transaction that spends multiple existing
 // wallet outputs into a single new address.
-func (w *Wallet) createDefragTransaction() ([]types.Transaction, error) {
+func (w *Wallet) managedCreateDefragTransaction() ([]types.Transaction, error) {
+	// dustThreshold and minFee have to be obtained separate from the lock
+	dustThreshold := w.DustThreshold()
+	minFee, _ := w.tpool.FeeEstimation()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	consensusHeight, err := dbGetConsensusHeight(w.dbTx)
 	if err != nil {
 		return nil, err
@@ -23,7 +30,7 @@ func (w *Wallet) createDefragTransaction() ([]types.Transaction, error) {
 	// Collect a value-sorted set of siacoin outputs.
 	var so sortedOutputs
 	err = dbForEachSiacoinOutput(w.dbTx, func(scoid types.SiacoinOutputID, sco types.SiacoinOutput) {
-		if w.checkOutput(w.dbTx, consensusHeight, scoid, sco) == nil {
+		if w.checkOutput(w.dbTx, consensusHeight, scoid, sco, dustThreshold) == nil {
 			so.ids = append(so.ids, scoid)
 			so.outputs = append(so.outputs, sco)
 		}
@@ -78,11 +85,15 @@ func (w *Wallet) createDefragTransaction() ([]types.Transaction, error) {
 	}
 
 	// Create the defrag transaction.
-	fee := defragFee()
 	refundAddr, err := w.nextPrimarySeedAddress(w.dbTx)
 	if err != nil {
 		return nil, err
 	}
+
+	// compute the transaction fee.
+	sizeAvgOutput := uint64(250)
+	fee := minFee.Mul64(sizeAvgOutput * defragBatchSize)
+
 	txn := types.Transaction{
 		SiacoinInputs: []types.SiacoinInput{{
 			ParentID:         parentTxn.SiacoinOutputID(0),
@@ -124,21 +135,38 @@ func (w *Wallet) threadedDefragWallet() {
 	defer w.tg.Done()
 
 	// Check that a defrag makes sense.
-	w.mu.Lock()
-	if !w.unlocked {
+	w.mu.RLock()
+	unlocked := w.unlocked
+	w.mu.RUnlock()
+	if !unlocked {
 		// Can't defrag if the wallet is locked.
-		w.mu.Unlock()
 		return
 	}
 
 	// Create the defrag transaction.
-	txnSet, err := w.createDefragTransaction()
-	w.mu.Unlock()
+	txnSet, err := w.managedCreateDefragTransaction()
+	defer func() {
+		if err == nil {
+			return
+		}
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, txn := range txnSet {
+			for _, sci := range txn.SiacoinInputs {
+				dbDeleteSpentOutput(w.dbTx, types.OutputID(sci.ParentID))
+			}
+		}
+	}()
 	if err == errDefragNotNeeded {
-		// benign
+		// begin
 		return
 	} else if err != nil {
 		w.log.Println("WARN: couldn't create defrag transaction:", err)
+		return
+	}
+
+	if w.deps.Disrupt("DefragInterrupted") {
+		err = errors.New("defrag was interrupted (DefragInterrupted)")
 		return
 	}
 	// Submit the defrag to the transaction pool.

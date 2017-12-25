@@ -23,7 +23,7 @@ var (
 	errNilConsensusChange = errors.New("no consensus change found")
 
 	// errNilFeeMedian is the message returned if a database does not find fee
-	// median persistance.
+	// median persistence.
 	errNilFeeMedian = errors.New("no fee median found")
 )
 
@@ -56,9 +56,15 @@ func (tp *TransactionPool) syncDB() {
 		tp.log.Severe("ERROR: failed to apply database update:", err)
 		tp.dbTx.Rollback()
 	}
+	// Begin a new tx
 	tp.dbTx, err = tp.db.Begin(true)
 	if err != nil {
 		tp.log.Severe("ERROR: failed to initialize a db transaction:", err)
+	}
+	// Flush the cached DB pages from memory
+	err = tp.dbTx.FlushDBPages()
+	if err != nil {
+		tp.log.Severe("ERROR: failed to flush db pages:", err)
 	}
 }
 

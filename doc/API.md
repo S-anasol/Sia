@@ -750,7 +750,8 @@ returns the current settings along with metrics on the renter's spending.
     "storagespending":  "1234", // hastings
     "uploadspending":   "5678", // hastings
     "unspent":          "1234"  // hastings
-  }
+  },
+  "currentperiod": "200"
 }
 ```
 
@@ -857,10 +858,12 @@ lists the status of all files.
   "files": [
     {
       "siapath":        "foo/bar.txt",
+      "localpath":      "/home/foo/bar.txt",
       "filesize":       8192, // bytes
       "available":      true,
       "renewing":       true,
       "redundancy":     5,
+      "bytesuploaded":  209715200, // total bytes uploaded
       "uploadprogress": 100, // percent
       "expiration":     60000
     }
@@ -1075,6 +1078,8 @@ locked or unlocked.
 
   "siafundbalance":      "1",    // siafunds, big int
   "siacoinclaimbalance": "9001", // hastings, big int
+
+  "dustthreshold": "1234", // hastings / byte, big int
 }
 ```
 

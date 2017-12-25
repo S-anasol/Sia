@@ -44,7 +44,7 @@ func announceAllHosts(sts []*serverTester) error {
 		return err
 	}
 
-	// Grab the inital transaction pool size to know how many total transactions
+	// Grab the initial transaction pool size to know how many total transactions
 	// there should be after announcement.
 	initialTpoolSize := len(sts[0].tpool.TransactionList())
 
@@ -96,6 +96,14 @@ func announceAllHosts(sts []*serverTester) error {
 	if err != nil {
 		return err
 	}
+	// Block until the block propagated to all nodes
+	for _, st := range sts[1:] {
+		err = waitForBlock(sts[0].cs.CurrentBlock().ID(), st)
+		if err != nil {
+			return (err)
+		}
+	}
+	// Check if all nodes are on the same block now
 	_, err = synchronizationCheck(sts)
 	if err != nil {
 		return err
@@ -248,6 +256,14 @@ func synchronizationCheck(sts []*serverTester) (types.BlockID, error) {
 	// check for synchronization if there aren't any nodes to be synchronized.
 	if len(sts) == 0 {
 		return types.BlockID{}, errors.New("no server testers provided")
+	}
+
+	// Wait until all nodes are on the same block
+	for _, st := range sts[1:] {
+		err := waitForBlock(sts[0].cs.CurrentBlock().ID(), st)
+		if err != nil {
+			return types.BlockID{}, err
+		}
 	}
 
 	var cg ConsensusGET
