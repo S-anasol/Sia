@@ -5,7 +5,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/types"
 )
@@ -29,12 +28,11 @@ type ErasureCoder interface {
 	// containing parity data.
 	Encode(data []byte) ([][]byte, error)
 
-	// Recover recovers the original data from pieces (including parity) and
-	// writes it to w. pieces should be identical to the slice returned by
-	// Encode (length and order must be preserved), but with missing elements
-	// set to nil. n is the number of bytes to be written to w; this is
-	// necessary because pieces may have been padded with zeros during
-	// encoding.
+	// Recover recovers the original data from pieces and writes it to w.
+	// pieces should be identical to the slice returned by Encode (length and
+	// order must be preserved), but with missing elements set to nil. n is
+	// the number of bytes to be written to w; this is necessary because
+	// pieces may have been padded with zeros during encoding.
 	Recover(pieces [][]byte, n uint64, w io.Writer) error
 }
 
@@ -45,6 +43,13 @@ type Allowance struct {
 	Hosts       uint64            `json:"hosts"`
 	Period      types.BlockHeight `json:"period"`
 	RenewWindow types.BlockHeight `json:"renewwindow"`
+}
+
+// ContractUtility contains metrics internal to the contractor that reflect the
+// utility of a given contract.
+type ContractUtility struct {
+	GoodForUpload bool
+	GoodForRenew  bool
 }
 
 // DownloadInfo provides information about a file that has been requested for
@@ -62,6 +67,7 @@ type DownloadInfo struct {
 type DownloadWriter interface {
 	WriteAt(b []byte, off int64) (int, error)
 	Destination() string
+	Close() error
 }
 
 // FileUploadParams contains the information used by the Renter to upload a
@@ -75,10 +81,12 @@ type FileUploadParams struct {
 // FileInfo provides information about a file.
 type FileInfo struct {
 	SiaPath        string            `json:"siapath"`
+	LocalPath      string            `json:"localpath"`
 	Filesize       uint64            `json:"filesize"`
 	Available      bool              `json:"available"`
 	Renewing       bool              `json:"renewing"`
 	Redundancy     float64           `json:"redundancy"`
+	UploadedBytes  uint64            `json:"uploadedbytes"`
 	UploadProgress float64           `json:"uploadprogress"`
 	Expiration     types.BlockHeight `json:"expiration"`
 }
@@ -204,49 +212,56 @@ func (mrs *MerkleRootSet) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// A RenterContract contains all the metadata necessary to revise or renew a
-// file contract. See `api.RenterContract` for field information.
+// A RenterContract contains metadata about a file contract. It is read-only;
+// modifying a RenterContract does not modify the actual file contract.
 type RenterContract struct {
-	FileContract    types.FileContract         `json:"filecontract"`
-	HostPublicKey   types.SiaPublicKey         `json:"hostpublickey"`
-	ID              types.FileContractID       `json:"id"`
-	LastRevision    types.FileContractRevision `json:"lastrevision"`
-	LastRevisionTxn types.Transaction          `json:"lastrevisiontxn"`
-	MerkleRoots     MerkleRootSet              `json:"merkleroots"`
-	NetAddress      NetAddress                 `json:"netaddress"`
-	SecretKey       crypto.SecretKey           `json:"secretkey"`
-	StartHeight     types.BlockHeight          `json:"startheight"`
+	ID            types.FileContractID
+	HostPublicKey types.SiaPublicKey
+	Transaction   types.Transaction
 
+	StartHeight types.BlockHeight
+	EndHeight   types.BlockHeight
+
+	// RenterFunds is the amount remaining in the contract that the renter can
+	// spend.
+	RenterFunds types.Currency
+
+	// The FileContract does not indicate what funds were spent on, so we have
+	// to track the various costs manually.
+	DownloadSpending types.Currency
+	StorageSpending  types.Currency
+	UploadSpending   types.Currency
+
+	// TotalCost indicates the amount of money that the renter spent and/or
+	// locked up while forming a contract. This includes fees, and includes
+	// funds which were allocated (but not necessarily committed) to spend on
+	// uploads/downloads/storage.
+	//
+	// ContractFee is the amount of money paid to the host to cover potential
+	// future transaction fees that the host may incur, and to cover any other
+	// overheads the host may have.
+	//
+	// TxnFee is the amount of money spent on the transaction fee when putting
+	// the renter contract on the blockchain.
+	//
+	// SiafundFee is the amount of money spent on siafund fees when creating the
+	// contract. The siafund fee that the renter pays covers both the renter and
+	// the host portions of the contract, and therefore can be unexpectedly high
+	// if the the host collateral is high.
+	TotalCost   types.Currency
+	ContractFee types.Currency
+	TxnFee      types.Currency
+	SiafundFee  types.Currency
+}
+
+// ContractorSpending contains the metrics about how much the Contractor has
+// spent during the current billing period.
+type ContractorSpending struct {
+	ContractSpending types.Currency `json:"contractspending"`
 	DownloadSpending types.Currency `json:"downloadspending"`
 	StorageSpending  types.Currency `json:"storagespending"`
 	UploadSpending   types.Currency `json:"uploadspending"`
-
-	TotalCost   types.Currency `json:"totalcost"`
-	ContractFee types.Currency `json:"contractfee"`
-	TxnFee      types.Currency `json:"txnfee"`
-	SiafundFee  types.Currency `json:"siafundfee"`
-
-	// GoodForUpload indicates whether the contract should be used to upload new
-	// data or not, and GoodForRenew indicates whether or not the contract
-	// should be renewed.
-	GoodForRenew  bool
-	GoodForUpload bool
-}
-
-// EndHeight returns the height at which the host is no longer obligated to
-// store contract data.
-func (rc *RenterContract) EndHeight() types.BlockHeight {
-	return rc.LastRevision.NewWindowStart
-}
-
-// RenterFunds returns the funds remaining in the contract's Renter payout as
-// of the most recent revision.
-func (rc *RenterContract) RenterFunds() types.Currency {
-	if len(rc.LastRevision.NewValidProofOutputs) < 2 {
-		build.Critical("malformed RenterContract:", rc)
-		return types.ZeroCurrency
-	}
-	return rc.LastRevision.NewValidProofOutputs[0].Value
+	Unspent          types.Currency `json:"unspent"`
 }
 
 // A Renter uploads, tracks, repairs, and downloads a set of files for the
@@ -268,6 +283,10 @@ type Renter interface {
 	// CurrentPeriod returns the height at which the current allowance period
 	// began.
 	CurrentPeriod() types.BlockHeight
+
+	// PeriodSpending returns the amount spent on contracts in the current
+	// billing period.
+	PeriodSpending() ContractorSpending
 
 	// DeleteFile deletes a file entry from the renter.
 	DeleteFile(path string) error

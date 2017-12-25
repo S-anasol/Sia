@@ -12,12 +12,6 @@ import (
 )
 
 var (
-	errInsufficientContracts = errors.New("not enough contracts to upload file")
-	errUploadDirectory       = errors.New("cannot upload directory")
-
-	// Erasure-coded piece size
-	pieceSize = modules.SectorSize - crypto.TwofishOverhead
-
 	// defaultDataPieces is the number of data pieces per erasure-coded chunk
 	defaultDataPieces = func() int {
 		switch build.Release {
@@ -44,14 +38,20 @@ var (
 		}
 		panic("undefined defaultParityPieces")
 	}()
+
+	errInsufficientContracts = errors.New("not enough contracts to upload file")
+	errUploadDirectory       = errors.New("cannot upload directory")
+
+	// Erasure-coded piece size
+	pieceSize = modules.SectorSize - crypto.TwofishOverhead
 )
 
 // validateSiapath checks that a Siapath is a legal filename.
-// ../ is disallowed to prevent directory traversal,
-// and paths must not begin with / or be empty.
+// ../ is disallowed to prevent directory traversal, and paths must not begin
+// with / or be empty.
 func validateSiapath(siapath string) error {
-	if strings.HasPrefix(siapath, "/") || strings.HasPrefix(siapath, "./") {
-		return errors.New("nicknames cannot begin with /")
+	if strings.HasPrefix(siapath, "/") {
+		return errors.New("siapath cannot begin with /")
 	}
 
 	if siapath == "" {
@@ -90,7 +90,6 @@ func (r *Renter) Upload(up modules.FileUploadParams) error {
 	if err := validateSiapath(up.SiaPath); err != nil {
 		return err
 	}
-
 	// Enforce source rules.
 	if err := validateSource(up.Source); err != nil {
 		return err
@@ -138,6 +137,6 @@ func (r *Renter) Upload(up modules.FileUploadParams) error {
 	}
 
 	// Send the upload to the repair loop.
-	r.newRepairs <- f
+	r.newUploads <- f
 	return nil
 }

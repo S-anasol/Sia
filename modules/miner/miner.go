@@ -1,3 +1,4 @@
+// Package miner is responsible for creating and submitting siacoin blocks
 package miner
 
 import (
@@ -15,6 +16,15 @@ import (
 )
 
 var (
+	// BlockMemory is the maximum number of blocks the miner will store
+	// Blocks take up to 2 megabytes of memory, which is why this number is
+	// limited.
+	BlockMemory = build.Select(build.Var{
+		Standard: 50,
+		Dev:      10,
+		Testing:  5,
+	}).(int)
+
 	errNilCS     = errors.New("miner cannot use a nil consensus set")
 	errNilTpool  = errors.New("miner cannot use a nil transaction pool")
 	errNilWallet = errors.New("miner cannot use a nil wallet")
@@ -30,15 +40,6 @@ var (
 		Testing:  50,
 	}).(int)
 
-	// BlockMemory is the maximum number of blocks the miner will store
-	// Blocks take up to 2 megabytes of memory, which is why this number is
-	// limited.
-	BlockMemory = build.Select(build.Var{
-		Standard: 50,
-		Dev:      10,
-		Testing:  5,
-	}).(int)
-
 	// MaxSourceBlockAge is the maximum amount of time that is allowed to
 	// elapse between generating source blocks.
 	MaxSourceBlockAge = build.Select(build.Var{
@@ -48,7 +49,7 @@ var (
 	}).(time.Duration)
 )
 
-// splitSet defines a transaction set that can be added componenet-wise to a
+// splitSet defines a transaction set that can be added components-wise to a
 // block. It's split because it doesn't necessarily represent the full set
 // prpovided by the transaction pool. Splits can be sorted so that the largest
 // and most valuable sets can be selected when picking transactions.
@@ -248,7 +249,15 @@ func (m *Miner) Close() error {
 // checkAddress checks that the miner has an address, fetching an address from
 // the wallet if not.
 func (m *Miner) checkAddress() error {
-	if m.persist.Address != (types.UnlockHash{}) {
+	addrs := m.wallet.AllAddresses()
+	hasAddr := false
+	for _, addr := range addrs {
+		if m.persist.Address == addr {
+			hasAddr = true
+			break
+		}
+	}
+	if m.persist.Address != (types.UnlockHash{}) && hasAddr {
 		return nil
 	}
 	uc, err := m.wallet.NextAddress()

@@ -9,7 +9,6 @@ import (
 	"os"
 	"reflect"
 
-	"github.com/bgentry/speakeasy"
 	"github.com/spf13/cobra"
 
 	"github.com/NebulousLabs/Sia/api"
@@ -19,15 +18,19 @@ import (
 var (
 	// Flags.
 	addr              string // override default API address
-	initPassword      bool   // supply a custom password when creating a wallet
-	initForce         bool   // destroy and reencrypt the wallet on init if it already exists
 	hostVerbose       bool   // display additional host info
-	renterShowHistory bool   // Show download history in addition to download queue.
+	initForce         bool   // destroy and reencrypt the wallet on init if it already exists
+	initPassword      bool   // supply a custom password when creating a wallet
 	renterListVerbose bool   // Show additional info about uploaded files.
+	renterShowHistory bool   // Show download history in addition to download queue.
+)
 
+var (
 	// Globals.
 	rootCmd *cobra.Command // Root command cobra object, used by bash completion cmd.
+)
 
+var (
 	// User-supplied password, cached so that we don't need to prompt multiple
 	// times.
 	apiPassword string
@@ -74,11 +77,16 @@ func apiGet(call string) (*http.Response, error) {
 		// retry request with authentication.
 		resp.Body.Close()
 		if apiPassword == "" {
-			// prompt for password and store it in a global var for subsequent
-			// calls
-			apiPassword, err = speakeasy.Ask("API password: ")
-			if err != nil {
-				return nil, err
+			apiPassword = os.Getenv("SIA_API_PASSWORD")
+			if apiPassword != "" {
+				fmt.Println("Using SIA_API_PASSWORD environment variable")
+			} else {
+				// prompt for password and store it in a global var for subsequent
+				// calls
+				apiPassword, err = passwordPrompt("API password: ")
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 		resp, err = api.HttpGETAuthenticated("http://"+addr+call, apiPassword)
@@ -144,12 +152,17 @@ func apiPost(call, vals string) (*http.Response, error) {
 	// check error code
 	if resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
-		// Prompt for password and retry request with authentication.
-		password, err := speakeasy.Ask("API password: ")
-		if err != nil {
-			return nil, err
+		apiPassword = os.Getenv("SIA_API_PASSWORD")
+		if apiPassword != "" {
+			fmt.Println("Using SIA_API_PASSWORD environment variable")
+		} else {
+			// Prompt for password and retry request with authentication.
+			apiPassword, err = passwordPrompt("API password: ")
+			if err != nil {
+				return nil, err
+			}
 		}
-		resp, err = api.HttpPOSTAuthenticated("http://"+addr+call, vals, password)
+		resp, err = api.HttpPOSTAuthenticated("http://"+addr+call, vals, apiPassword)
 		if err != nil {
 			return nil, errors.New("no response from daemon - authentication failed")
 		}
@@ -271,6 +284,7 @@ func main() {
 	walletInitSeedCmd.Flags().BoolVarP(&initForce, "force", "", false, "destroy the existing wallet")
 	walletLoadCmd.AddCommand(walletLoad033xCmd, walletLoadSeedCmd, walletLoadSiagCmd)
 	walletSendCmd.AddCommand(walletSendSiacoinsCmd, walletSendSiafundsCmd)
+	walletUnlockCmd.Flags().BoolVarP(&initPassword, "password", "p", false, "Display interactive password prompt even if SIA_WALLET_PASSWORD is set")
 
 	root.AddCommand(renterCmd)
 	renterCmd.AddCommand(renterFilesDeleteCmd, renterFilesDownloadCmd,

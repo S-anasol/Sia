@@ -11,58 +11,76 @@ import (
 )
 
 // Renew negotiates a new contract for data already stored with a host, and
-// submits the new contract transaction to tpool.
-func Renew(contract modules.RenterContract, params ContractParams, txnBuilder transactionBuilder, tpool transactionPool, hdb hostDB, cancel <-chan struct{}) (modules.RenterContract, error) {
-	// extract vars from params, for convenience
-	host, filesize, startHeight, endHeight, refundAddress := params.Host, params.Filesize, params.StartHeight, params.EndHeight, params.RefundAddress
-	ourSK := contract.SecretKey
+// submits the new contract transaction to tpool. The new contract is added to
+// the ContractSet and its metadata is returned.
+func (cs *ContractSet) Renew(oldContract *SafeContract, params ContractParams, txnBuilder transactionBuilder, tpool transactionPool, hdb hostDB, cancel <-chan struct{}) (modules.RenterContract, error) {
+	// for convenience
+	contract := oldContract.header
 
-	// calculate cost to renter and cost to host
-	storageAllocation := host.StoragePrice.Mul64(filesize).Mul64(uint64(endHeight - startHeight))
-	hostCollateral := host.Collateral.Mul64(filesize).Mul64(uint64(endHeight - startHeight))
+	// Extract vars from params, for convenience.
+	host, funding, startHeight, endHeight, refundAddress := params.Host, params.Funding, params.StartHeight, params.EndHeight, params.RefundAddress
+	ourSK := contract.SecretKey
+	lastRev := contract.LastRevision()
+
+	// Calculate additional basePrice and baseCollateral. If the contract height
+	// did not increase, basePrice and baseCollateral are zero.
+	var basePrice, baseCollateral types.Currency
+	if endHeight+host.WindowSize > lastRev.NewWindowEnd {
+		timeExtension := uint64((endHeight + host.WindowSize) - lastRev.NewWindowEnd)
+		basePrice = host.StoragePrice.Mul64(lastRev.NewFileSize).Mul64(timeExtension)    // cost of data already covered by contract, i.e. lastrevision.Filesize
+		baseCollateral = host.Collateral.Mul64(lastRev.NewFileSize).Mul64(timeExtension) // same but collateral
+	}
+
+	// Calculate the anticipated transaction fee.
+	_, maxFee := tpool.FeeEstimation()
+	txnFee := maxFee.Mul64(estTxnSize)
+
+	// Underflow check.
+	if funding.Cmp(host.ContractPrice.Add(txnFee).Add(basePrice)) <= 0 {
+		return modules.RenterContract{}, errors.New("insufficient funds to cover contract fee and transaction fee during contract renewal")
+	}
+	// Divide by zero check.
+	if host.StoragePrice.IsZero() {
+		host.StoragePrice = types.NewCurrency64(1)
+	}
+
+	// Calculate the payouts for the renter, host, and whole contract.
+	renterPayout := funding.Sub(host.ContractPrice).Sub(txnFee).Sub(basePrice) // renter payout is pre-tax
+	maxStorageSize := renterPayout.Div(host.StoragePrice)
+	hostCollateral := maxStorageSize.Mul(host.Collateral)
 	if hostCollateral.Cmp(host.MaxCollateral) > 0 {
-		// TODO: if we have to cap the collateral, it probably means we shouldn't be using this host
-		// (ok within a factor of 2)
 		hostCollateral = host.MaxCollateral
 	}
 
-	// Calculate additional basePrice and baseCollateral. If the contract
-	// height did not increase, basePrice and baseCollateral are zero.
-	var basePrice, baseCollateral types.Currency
-	if endHeight+host.WindowSize > contract.LastRevision.NewWindowEnd {
-		timeExtension := uint64((endHeight + host.WindowSize) - contract.LastRevision.NewWindowEnd)
-		basePrice = host.StoragePrice.Mul64(contract.LastRevision.NewFileSize).Mul64(timeExtension)    // cost of data already covered by contract, i.e. lastrevision.Filesize
-		baseCollateral = host.Collateral.Mul64(contract.LastRevision.NewFileSize).Mul64(timeExtension) // same but collateral
-	}
-
+	// Determine the host payout and the total payout for the contract.
 	hostPayout := hostCollateral.Add(host.ContractPrice).Add(basePrice)
-	payout := storageAllocation.Add(hostCollateral.Add(host.ContractPrice)).Mul64(10406).Div64(10000) // renter covers siafund fee
+	totalPayout := renterPayout.Add(hostPayout)
 
 	// check for negative currency
-	if types.PostTax(startHeight, payout).Cmp(hostPayout) < 0 {
-		return modules.RenterContract{}, errors.New("payout smaller than host payout")
+	if types.PostTax(startHeight, totalPayout).Cmp(hostPayout) < 0 {
+		return modules.RenterContract{}, errors.New("insufficient funds to pay both siafund fee and also host payout")
 	} else if hostCollateral.Cmp(baseCollateral) < 0 {
-		return modules.RenterContract{}, errors.New("new collateral smaller than old collateral")
+		return modules.RenterContract{}, errors.New("new collateral smaller than base collateral")
 	}
 
 	// create file contract
 	fc := types.FileContract{
-		FileSize:       contract.LastRevision.NewFileSize,
-		FileMerkleRoot: contract.LastRevision.NewFileMerkleRoot,
+		FileSize:       lastRev.NewFileSize,
+		FileMerkleRoot: lastRev.NewFileMerkleRoot,
 		WindowStart:    endHeight,
 		WindowEnd:      endHeight + host.WindowSize,
-		Payout:         payout,
-		UnlockHash:     contract.LastRevision.NewUnlockHash,
+		Payout:         totalPayout,
+		UnlockHash:     lastRev.NewUnlockHash,
 		RevisionNumber: 0,
 		ValidProofOutputs: []types.SiacoinOutput{
 			// renter
-			{Value: types.PostTax(startHeight, payout).Sub(hostPayout), UnlockHash: refundAddress},
+			{Value: types.PostTax(startHeight, totalPayout).Sub(hostPayout), UnlockHash: refundAddress},
 			// host
 			{Value: hostPayout, UnlockHash: host.UnlockHash},
 		},
 		MissedProofOutputs: []types.SiacoinOutput{
 			// renter
-			{Value: types.PostTax(startHeight, payout).Sub(hostPayout), UnlockHash: refundAddress},
+			{Value: types.PostTax(startHeight, totalPayout).Sub(hostPayout), UnlockHash: refundAddress},
 			// host gets its unused collateral back, plus the contract price
 			{Value: hostCollateral.Sub(baseCollateral).Add(host.ContractPrice), UnlockHash: host.UnlockHash},
 			// void gets the spent storage fees, plus the collateral being risked
@@ -70,18 +88,12 @@ func Renew(contract modules.RenterContract, params ContractParams, txnBuilder tr
 		},
 	}
 
-	// calculate transaction fee
-	_, maxFee := tpool.FeeEstimation()
-	txnFee := maxFee.Mul64(estTxnSize)
-
 	// build transaction containing fc
-	renterCost := payout.Sub(hostCollateral).Add(txnFee)
-	err := txnBuilder.FundSiacoins(renterCost)
+	err := txnBuilder.FundSiacoins(funding)
 	if err != nil {
 		return modules.RenterContract{}, err
 	}
 	txnBuilder.AddFileContract(fc)
-
 	// add miner fee
 	txnBuilder.AddMinerFee(txnFee)
 
@@ -93,9 +105,9 @@ func Renew(contract modules.RenterContract, params ContractParams, txnBuilder tr
 	defer func() {
 		// A revision mismatch might not be the host's fault.
 		if err != nil && !IsRevisionMismatch(err) {
-			hdb.IncrementFailedInteractions(contract.HostPublicKey)
+			hdb.IncrementFailedInteractions(contract.HostPublicKey())
 		} else if err == nil {
-			hdb.IncrementSuccessfulInteractions(contract.HostPublicKey)
+			hdb.IncrementSuccessfulInteractions(contract.HostPublicKey())
 		}
 	}()
 
@@ -188,7 +200,7 @@ func Renew(contract modules.RenterContract, params ContractParams, txnBuilder tr
 	// create initial (no-op) revision, transaction, and signature
 	initRevision := types.FileContractRevision{
 		ParentID:          signedTxnSet[len(signedTxnSet)-1].FileContractID(0),
-		UnlockConditions:  contract.LastRevision.UnlockConditions,
+		UnlockConditions:  lastRev.UnlockConditions,
 		NewRevisionNumber: 1,
 
 		NewFileSize:           fc.FileSize,
@@ -256,23 +268,21 @@ func Renew(contract modules.RenterContract, params ContractParams, txnBuilder tr
 		return modules.RenterContract{}, err
 	}
 
-	// calculate contract ID
-	fcid := txn.FileContractID(0)
-
-	return modules.RenterContract{
-		FileContract:    fc,
-		HostPublicKey:   host.PublicKey,
-		ID:              fcid,
-		LastRevision:    initRevision,
-		LastRevisionTxn: revisionTxn,
-		MerkleRoots:     contract.MerkleRoots,
-		NetAddress:      host.NetAddress,
-		SecretKey:       ourSK,
-		StartHeight:     startHeight,
-
-		TotalCost:   renterCost,
+	// Construct contract header.
+	header := contractHeader{
+		Transaction: revisionTxn,
+		SecretKey:   ourSK,
+		StartHeight: startHeight,
+		TotalCost:   funding,
 		ContractFee: host.ContractPrice,
 		TxnFee:      txnFee,
 		SiafundFee:  types.Tax(startHeight, fc.Payout),
-	}, nil
+	}
+
+	// Add contract to set.
+	meta, err := cs.managedInsertContract(header, oldContract.merkleRoots)
+	if err != nil {
+		return modules.RenterContract{}, err
+	}
+	return meta, nil
 }

@@ -91,7 +91,7 @@ func TestLoadSeed(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester(t.Name())
+	wt, err := createWalletTester(t.Name(), &ProductionDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestSweepSeedCoins(t *testing.T) {
 	}
 	t.Parallel()
 	// create a wallet with some money
-	wt, err := createWalletTester("TestSweepSeedCoins0")
+	wt, err := createWalletTester("TestSweepSeedCoins0", &ProductionDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,10 @@ func TestSweepSeedCoins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wt.miner.AddBlock()
+	_, err = wt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// create a blank wallet
 	dir := filepath.Join(build.TempDir(modules.WalletDir, "TestSweepSeedCoins1"), modules.WalletDir)
@@ -235,7 +238,7 @@ func TestSweepSeedFunds(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester("TestSweepSeedFunds")
+	wt, err := createWalletTester("TestSweepSeedFunds", &ProductionDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +313,7 @@ func TestSweepSeedSentFunds(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester("TestSweepSeedSentFunds")
+	wt, err := createWalletTester("TestSweepSeedSentFunds", &ProductionDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +400,7 @@ func TestSweepSeedCoinsAndFunds(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester("TestSweepSeedCoinsAndFunds")
+	wt, err := createWalletTester("TestSweepSeedCoinsAndFunds", &ProductionDependencies{})
 	if err != nil {
 		t.Fatal(err)
 	}

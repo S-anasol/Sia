@@ -89,10 +89,6 @@ var (
 	// inputs.
 	errInsaneStorageObligationRevisionData = errors.New("revision to storage obligation has insane data")
 
-	// errObligationUnlocked is returned when a storage obligation is being
-	// removed from lock, but is already unlocked.
-	errObligationUnlocked = errors.New("storage obligation is unlocked, and should not be getting unlocked")
-
 	// errNoBuffer is returned if there is an attempted storage obligation that
 	// needs to have the storage proof submitted in less than
 	// revisionSubmissionBuffer blocks.
@@ -101,6 +97,10 @@ var (
 	// errNoStorageObligation is returned if the requested storage obligation
 	// is not found in the database.
 	errNoStorageObligation = errors.New("storage obligation not found in database")
+
+	// errObligationUnlocked is returned when a storage obligation is being
+	// removed from lock, but is already unlocked.
+	errObligationUnlocked = errors.New("storage obligation is unlocked, and should not be getting unlocked")
 )
 
 type storageObligationStatus uint64
@@ -287,7 +287,7 @@ func (h *Host) queueActionItem(height types.BlockHeight, id types.FileContractID
 	// Sanity check - action item should be at a higher height than the current
 	// block height.
 	if height <= h.blockHeight {
-		h.log.Critical("action item queued improperly")
+		h.log.Println("action item queued improperly")
 	}
 	return h.db.Update(func(tx *bolt.Tx) error {
 		// Translate the height into a byte slice.
@@ -555,7 +555,7 @@ func (h *Host) removeStorageObligation(so storageObligation, sos storageObligati
 	}
 	if sos == obligationSucceeded {
 		// Remove the obligation statistics as potential risk and income.
-		h.log.Printf("Successfully submitted a storage proof. Revenue is %v.\n", h.financialMetrics.PotentialContractCompensation.Add(h.financialMetrics.PotentialStorageRevenue).Add(h.financialMetrics.PotentialDownloadBandwidthRevenue).Add(h.financialMetrics.PotentialUploadBandwidthRevenue))
+		h.log.Printf("Successfully submitted a storage proof. Revenue is %v.\n", so.ContractCost.Add(so.PotentialStorageRevenue).Add(so.PotentialDownloadRevenue).Add(so.PotentialUploadRevenue))
 		h.financialMetrics.PotentialContractCompensation = h.financialMetrics.PotentialContractCompensation.Sub(so.ContractCost)
 		h.financialMetrics.LockedStorageCollateral = h.financialMetrics.LockedStorageCollateral.Sub(so.LockedCollateral)
 		h.financialMetrics.PotentialStorageRevenue = h.financialMetrics.PotentialStorageRevenue.Sub(so.PotentialStorageRevenue)
@@ -571,7 +571,7 @@ func (h *Host) removeStorageObligation(so storageObligation, sos storageObligati
 	}
 	if sos == obligationFailed {
 		// Remove the obligation statistics as potential risk and income.
-		h.log.Printf("Missed storage proof. Revenue would have been %v.\n", h.financialMetrics.PotentialContractCompensation.Add(h.financialMetrics.PotentialStorageRevenue).Add(h.financialMetrics.PotentialDownloadBandwidthRevenue).Add(h.financialMetrics.PotentialUploadBandwidthRevenue))
+		h.log.Printf("Missed storage proof. Revenue would have been %v.\n", so.ContractCost.Add(so.PotentialStorageRevenue).Add(so.PotentialDownloadRevenue).Add(so.PotentialUploadRevenue))
 		h.financialMetrics.PotentialContractCompensation = h.financialMetrics.PotentialContractCompensation.Sub(so.ContractCost)
 		h.financialMetrics.LockedStorageCollateral = h.financialMetrics.LockedStorageCollateral.Sub(so.LockedCollateral)
 		h.financialMetrics.PotentialStorageRevenue = h.financialMetrics.PotentialStorageRevenue.Sub(so.PotentialStorageRevenue)
