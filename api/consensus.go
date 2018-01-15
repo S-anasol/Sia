@@ -7,7 +7,11 @@ import (
 
 	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/types"
+	"github.com/NebulousLabs/Sia/encoding"
+	"github.com/NebulousLabs/Sia/modules"
 
+
+	"github.com/NebulousLabs/bolt"
 	"github.com/julienschmidt/httprouter"
 )
 
@@ -73,6 +77,10 @@ type ConsensusBlock struct {
 
 	MinerPayouts map[string]types.SiacoinOutput  `json:"minerpayouts"`
 	Transactions map[string]ConsensusTransaction `json:"transactions"`
+}
+
+type Scods struct {
+	scods []modules.SiacoinOutputDiff  `json:"scods"`
 }
 
 // consensusHandler handles the API calls to /consensus.
@@ -237,12 +245,12 @@ func (api *API) consensusBlocksHandler(w http.ResponseWriter, req *http.Request,
 		}
 	}
 
-    cbid := block.ID()
+	cbid := block.ID()
 	currentTarget, _ := api.cs.ChildTarget(cbid)
 
-    var estimatedHashrate types.Currency
-    var hashrateEstimationBlocks types.BlockHeight
-    // hashrateEstimationBlocks is the number of blocks that are used to
+	var estimatedHashrate types.Currency
+	var hashrateEstimationBlocks types.BlockHeight
+	// hashrateEstimationBlocks is the number of blocks that are used to
 	// estimate the current hashrate.
 	hashrateEstimationBlocks = 200 // 33 hours
 	if height > hashrateEstimationBlocks  {
@@ -270,9 +278,53 @@ func (api *API) consensusBlocksHandler(w http.ResponseWriter, req *http.Request,
 		BlockHeader:  block.Header(),
 		Transactions: ct,
 		MinerPayouts: minerpayouts,
-        Difficulty: currentTarget.Difficulty(),
-        Target: currentTarget,
-        TotalCoins: types.CalculateNumSiacoins(height),
-        EstimatedHashrate: estimatedHashrate,
+		Difficulty: currentTarget.Difficulty(),
+		Target: currentTarget,
+		TotalCoins: types.CalculateNumSiacoins(height),
+		EstimatedHashrate: estimatedHashrate,
 	})
+}
+
+
+// consensusBlocksHandler handles API calls to /consensus/blocks/:height.
+func (api *API) consensusFutureBlocksHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	// Parse the height that's being requested.
+	var height types.BlockHeight
+	_, err := fmt.Sscan(ps.ByName("height"), &height)
+	if err != nil {
+		WriteError(w, Error{err.Error()}, http.StatusBadRequest)
+		return
+	}
+
+
+	var (
+		prefixDSCO = []byte("dsco_")
+	)
+
+	bucketID := append(prefixDSCO, encoding.Marshal(height)...)
+	var scods []modules.SiacoinOutputDiff
+
+	_ = api.cs.Db().View(func(tx *bolt.Tx) error {
+		tx.Bucket(bucketID).ForEach(func(idBytes, scoBytes []byte) error {
+			// Decode the key-value pair into an id and a siacoin output.
+			var id types.SiacoinOutputID
+			var sco types.SiacoinOutput
+			copy(id[:], idBytes)
+			_ = encoding.Unmarshal(scoBytes, &sco)
+
+			// Add the output to the ConsensusSet and record the diff in the
+			// blockNode.
+			scod := modules.SiacoinOutputDiff{
+				Direction:     modules.DiffApply,
+				ID:            id,
+				SiacoinOutput: sco,
+			}
+			scods = append(scods, scod)
+			return nil
+		})
+		return nil
+	})
+
+
+	WriteJSON(w, scods)
 }
