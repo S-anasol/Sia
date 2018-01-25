@@ -23,6 +23,8 @@ dependencies:
 	go get -u github.com/inconshreveable/go-update
 	go get -u github.com/kardianos/osext
 	go get -u github.com/inconshreveable/mousetrap
+	go get -u github.com/mattn/go-sqlite3
+	go get -u github.com/lib/pq
 	# Frontend Dependencies
 	go get -u golang.org/x/crypto/ssh/terminal
 	go get -u github.com/spf13/cobra/...
@@ -39,8 +41,8 @@ run = .
 pkgs = ./api ./build ./compatibility ./crypto ./encoding ./modules ./modules/consensus                                  \
        ./modules/explorer ./modules/gateway ./modules/host ./modules/host/contractmanager                               \
        ./modules/renter ./modules/renter/contractor ./modules/renter/hostdb ./modules/renter/hostdb/hosttree            \
-       ./modules/renter/proto ./modules/miner ./modules/wallet ./modules/transactionpool ./persist                      \
-       ./cmd/siad ./cmd/siac ./sync ./types
+       ./modules/renter/proto ./modules/miner ./modules/wallet ./modules/transactionpool ./modules/miningpool ./persist \
+	   ./cmd/siac ./cmd/siad ./sync ./types
 
 # fmt calls go fmt on all packages.
 fmt:
