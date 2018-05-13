@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/NebulousLabs/Sia/build"
@@ -22,7 +23,7 @@ import (
 // passwordPrompt securely reads a password from stdin.
 func passwordPrompt(prompt string) (string, error) {
 	fmt.Print(prompt)
-	pw, err := terminal.ReadPassword(0)
+	pw, err := terminal.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
 	return string(pw), err
 }
@@ -150,37 +151,63 @@ func startDaemon(config Config) (err error) {
 		}
 	}
 
-	// Print the Siad Version
+	// Print the siad Version and GitRevision
 	fmt.Println("Sia Daemon v" + build.Version)
+	if build.GitRevision == "" {
+		fmt.Println("WARN: compiled without build commit or version. To compile correctly, please use the makefile")
+	} else {
+		fmt.Println("Git Revision " + build.GitRevision)
+	}
+
+	// Install a signal handler that will catch exceptions thrown by mmap'd
+	// files.
+	// NOTE: ideally we would catch SIGSEGV here too, since that signal can
+	// also be thrown by an mmap I/O error. However, SIGSEGV can occur under
+	// other circumstances as well, and in those cases, we will want a full
+	// stack trace.
+	mmapChan := make(chan os.Signal, 1)
+	signal.Notify(mmapChan, syscall.SIGBUS)
+	go func() {
+		<-mmapChan
+		fmt.Println("A fatal I/O exception (SIGBUS) has occurred.")
+		fmt.Println("Please check your disk for errors.")
+		os.Exit(1)
+	}()
+
 	// Print a startup message.
 	fmt.Println("Loading...")
 	loadStart := time.Now()
-
 	srv, err := NewServer(config)
 	if err != nil {
 		return err
 	}
-	go srv.Serve()
+	errChan := make(chan error)
+	go func() {
+		errChan <- srv.Serve()
+	}()
 	err = srv.loadModules()
 	if err != nil {
 		return err
 	}
 
-	// stop the server if a kill signal is caught
-	errChan := make(chan error)
+	// listen for kill signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, os.Kill)
-	go func() {
-		<-sigChan
-		fmt.Println("\rCaught stop signal, quitting...")
-		errChan <- srv.Close()
-	}()
 
 	// Print a 'startup complete' message.
 	startupTime := time.Since(loadStart)
 	fmt.Println("Finished loading in", startupTime.Seconds(), "seconds")
 
-	err = <-errChan
+	// wait for Serve to return or for kill signal to be caught
+	err = func() error {
+		select {
+		case err := <-errChan:
+			return err
+		case <-sigChan:
+			fmt.Println("\rCaught stop signal, quitting...")
+			return srv.Close()
+		}
+	}()
 	if err != nil {
 		build.Critical(err)
 	}

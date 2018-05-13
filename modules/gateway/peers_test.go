@@ -25,6 +25,7 @@ type dummyConn struct {
 func (dc *dummyConn) Read(p []byte) (int, error)       { return len(p), nil }
 func (dc *dummyConn) Write(p []byte) (int, error)      { return len(p), nil }
 func (dc *dummyConn) Close() error                     { return nil }
+func (dc *dummyConn) SetReadDeadline(time.Time) error  { return nil }
 func (dc *dummyConn) SetWriteDeadline(time.Time) error { return nil }
 
 // TestAddPeer tries adding a peer to the gateway.
@@ -590,20 +591,20 @@ func TestConnectRejectsVersions(t *testing.T) {
 		},
 		// Test that Connect /could/ succeed when the remote peer's version is >= 1.3.0.
 		{
-			version:         sessionUpgradeVersion,
+			version:         minimumAcceptablePeerVersion,
 			msg:             "Connect should succeed when the remote peer's version is 1.3.0 and sessionHeader checks out",
 			uniqueID:        func() (id gatewayID) { fastrand.Read(id[:]); return }(),
 			genesisID:       types.GenesisID,
-			versionRequired: sessionUpgradeVersion,
+			versionRequired: minimumAcceptablePeerVersion,
 		},
 		{
-			version:         sessionUpgradeVersion,
+			version:         minimumAcceptablePeerVersion,
 			msg:             "Connect should not succeed when peer is connecting to itself",
-			uniqueID:        g.id,
+			uniqueID:        g.staticId,
 			genesisID:       types.GenesisID,
 			errWant:         errOurAddress.Error(),
 			localErrWant:    errOurAddress.Error(),
-			versionRequired: sessionUpgradeVersion,
+			versionRequired: minimumAcceptablePeerVersion,
 		},
 	}
 	for testIndex, tt := range tests {
@@ -627,7 +628,7 @@ func TestConnectRejectsVersions(t *testing.T) {
 				panic(fmt.Sprintf("test #%d failed: remoteVersion != build.Version", testIndex))
 			}
 
-			if build.VersionCmp(tt.version, sessionUpgradeVersion) >= 0 {
+			if build.VersionCmp(tt.version, minimumAcceptablePeerVersion) >= 0 {
 				ourHeader := sessionHeader{
 					GenesisID:  tt.genesisID,
 					UniqueID:   tt.uniqueID,

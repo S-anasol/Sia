@@ -13,15 +13,37 @@ import (
 )
 
 const (
-	MaxObjectSize = 12e6 // 12 MB
-	MaxSliceSize  = 5e6  // 5 MB
+	// MaxObjectSize refers to the maximum size an object could have.
+	// Limited to 12 MB.
+	MaxObjectSize = 12e6
+
+	// MaxSliceSize refers to the maximum size slice could have. Limited
+	// to 5 MB.
+	MaxSliceSize = 5e6 // 5 MB
 )
 
 var (
-	errBadPointer     = errors.New("cannot decode into invalid pointer")
-	ErrObjectTooLarge = errors.New("encoded object exceeds size limit")
-	ErrSliceTooLarge  = errors.New("encoded slice is too large")
+	errBadPointer = errors.New("cannot decode into invalid pointer")
 )
+
+// ErrObjectTooLarge is an error when encoded object exceeds size limit.
+type ErrObjectTooLarge uint64
+
+// Error implements the error interface.
+func (e ErrObjectTooLarge) Error() string {
+	return fmt.Sprintf("encoded object (>= %v bytes) exceeds size limit (%v bytes)", uint64(e), uint64(MaxObjectSize))
+}
+
+// ErrSliceTooLarge is an error when encoded slice is too large.
+type ErrSliceTooLarge struct {
+	Len      uint64
+	ElemSize uint64
+}
+
+// Error implements the error interface.
+func (e ErrSliceTooLarge) Error() string {
+	return fmt.Sprintf("encoded slice (%v*%v bytes) exceeds size limit (%v bytes)", e.Len, e.ElemSize, uint64(MaxSliceSize))
+}
 
 type (
 	// A SiaMarshaler can encode and write itself to a stream.
@@ -87,9 +109,9 @@ func (e *Encoder) encode(val reflect.Value) error {
 	case reflect.Bool:
 		if val.Bool() {
 			return e.write([]byte{1})
-		} else {
-			return e.write([]byte{0})
 		}
+
+		return e.write([]byte{0})
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return e.write(EncInt64(val.Int()))
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
@@ -188,7 +210,7 @@ func (d *Decoder) Read(p []byte) (int, error) {
 	n, err := d.r.Read(p)
 	// enforce an absolute maximum size limit
 	if d.n += n; d.n > MaxObjectSize {
-		panic(ErrObjectTooLarge)
+		panic(ErrObjectTooLarge(d.n))
 	}
 	return n, err
 }
@@ -236,7 +258,7 @@ func (d *Decoder) readN(n int) []byte {
 			panic(io.ErrUnexpectedEOF)
 		}
 		if d.n += n; d.n > MaxObjectSize {
-			panic(ErrObjectTooLarge)
+			panic(ErrObjectTooLarge(d.n))
 		}
 		return b
 	}
@@ -299,7 +321,7 @@ func (d *Decoder) decode(val reflect.Value) {
 		// sanity-check the sliceLen, otherwise you can crash a peer by making
 		// them allocate a massive slice
 		if sliceLen > 1<<31-1 || sliceLen*uint64(val.Type().Elem().Size()) > MaxSliceSize {
-			panic(ErrSliceTooLarge)
+			panic(ErrSliceTooLarge{Len: sliceLen, ElemSize: uint64(val.Type().Elem().Size())})
 		} else if sliceLen == 0 {
 			return
 		}

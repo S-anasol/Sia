@@ -1,7 +1,6 @@
 package proto
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,7 +8,9 @@ import (
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
+	"github.com/NebulousLabs/ratelimit"
 
+	"github.com/NebulousLabs/errors"
 	"github.com/NebulousLabs/writeaheadlog"
 )
 
@@ -18,9 +19,11 @@ import (
 // to provide operations on the set as a whole.
 type ContractSet struct {
 	contracts map[types.FileContractID]*SafeContract
-	wal       *writeaheadlog.WAL
+	deps      modules.Dependencies
 	dir       string
 	mu        sync.Mutex
+	rl        *ratelimit.RateLimit
+	wal       *writeaheadlog.WAL
 }
 
 // Acquire looks up the contract with the specified FileContractID and locks
@@ -34,6 +37,15 @@ func (cs *ContractSet) Acquire(id types.FileContractID) (*SafeContract, bool) {
 		return nil, false
 	}
 	safeContract.mu.Lock()
+	// We need to check if the contract is still in the map or if it has been
+	// deleted in the meantime.
+	cs.mu.Lock()
+	_, ok = cs.contracts[id]
+	cs.mu.Unlock()
+	if !ok {
+		safeContract.mu.Unlock()
+		return nil, false
+	}
 	return safeContract, true
 }
 
@@ -45,13 +57,18 @@ func (cs *ContractSet) Delete(c *SafeContract) {
 	safeContract, ok := cs.contracts[c.header.ID()]
 	if !ok {
 		cs.mu.Unlock()
+		build.Critical("Delete called on already deleted contract")
 		return
 	}
 	delete(cs.contracts, c.header.ID())
 	cs.mu.Unlock()
 	safeContract.mu.Unlock()
 	// delete contract file
-	os.Remove(filepath.Join(cs.dir, c.header.ID().String()+contractExtension))
+	path := filepath.Join(cs.dir, c.header.ID().String()+contractExtension)
+	err := errors.Compose(safeContract.headerFile.Close(), os.Remove(path))
+	if err != nil {
+		build.Critical("Failed to delete SafeContract from disk:", err)
+	}
 }
 
 // IDs returns the FileContractID of each contract in the set. The contracts
@@ -87,6 +104,12 @@ func (cs *ContractSet) Return(c *SafeContract) {
 	safeContract.mu.Unlock()
 }
 
+// SetRateLimits sets the bandwidth limits for connections created by the
+// contractSet.
+func (cs *ContractSet) SetRateLimits(readBPS, writeBPS int64, packetSize uint64) {
+	cs.rl.SetLimits(readBPS, writeBPS, packetSize)
+}
+
 // View returns a copy of the contract with the specified ID. The contracts is
 // not locked. Certain fields, including the MerkleRoots, are set to nil for
 // safety reasons. If the contract is not present in the set, View
@@ -113,9 +136,10 @@ func (cs *ContractSet) ViewAll() []modules.RenterContract {
 	return contracts
 }
 
+// Close closes all contracts in a contract set, this means rendering it unusable for I/O
 func (cs *ContractSet) Close() error {
 	for _, c := range cs.contracts {
-		c.f.Close()
+		c.headerFile.Close()
 	}
 	_, err := cs.wal.CloseIncomplete()
 	return err
@@ -123,7 +147,7 @@ func (cs *ContractSet) Close() error {
 
 // NewContractSet returns a ContractSet storing its contracts in the specified
 // dir.
-func NewContractSet(dir string) (*ContractSet, error) {
+func NewContractSet(dir string, deps modules.Dependencies) (*ContractSet, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -151,9 +175,12 @@ func NewContractSet(dir string) (*ContractSet, error) {
 
 	cs := &ContractSet{
 		contracts: make(map[types.FileContractID]*SafeContract),
-		wal:       wal,
+		deps:      deps,
 		dir:       dir,
+		wal:       wal,
 	}
+	// Set the initial rate limit to 'unlimited' bandwidth with 4kib packets.
+	cs.rl = ratelimit.NewRateLimit(0, 0, 0)
 
 	// Load the contract files.
 	dirNames, err := d.Readdirnames(-1)

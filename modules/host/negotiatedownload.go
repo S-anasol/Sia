@@ -1,6 +1,7 @@
 package host
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -42,11 +43,11 @@ func (h *Host) managedDownloadIteration(conn net.Conn, so *storageObligation) er
 	}
 
 	// Grab a set of variables that will be useful later in the function.
-	h.mu.RLock()
+	h.mu.Lock()
 	blockHeight := h.blockHeight
 	secretKey := h.secretKey
-	settings := h.settings
-	h.mu.RUnlock()
+	settings := h.externalSettings()
+	h.mu.Unlock()
 
 	// Read the download requests, followed by the file contract revision that
 	// pays for them.
@@ -81,7 +82,7 @@ func (h *Host) managedDownloadIteration(conn net.Conn, so *storageObligation) er
 
 		// Verify that the correct amount of money has been moved from the
 		// renter's contract funds to the host's contract funds.
-		expectedTransfer := settings.MinDownloadBandwidthPrice.Mul64(totalSize)
+		expectedTransfer := settings.DownloadBandwidthPrice.Mul64(totalSize)
 		err = verifyPaymentRevision(existingRevision, paymentRevision, blockHeight, expectedTransfer)
 		if err != nil {
 			return extendErr("payment verification failed: ", err)
@@ -160,6 +161,18 @@ func verifyPaymentRevision(existingRevision, paymentRevision types.FileContractR
 	// has not already passed.
 	if existingRevision.NewWindowStart-revisionSubmissionBuffer <= blockHeight {
 		return errLateRevision
+	}
+
+	// Host payout addresses shouldn't change
+	if paymentRevision.NewValidProofOutputs[1].UnlockHash != existingRevision.NewValidProofOutputs[1].UnlockHash {
+		return errors.New("host payout address changed")
+	}
+	if paymentRevision.NewMissedProofOutputs[1].UnlockHash != existingRevision.NewMissedProofOutputs[1].UnlockHash {
+		return errors.New("host payout address changed")
+	}
+	// Make sure the lost collateral still goes to the void
+	if paymentRevision.NewMissedProofOutputs[2].UnlockHash != existingRevision.NewMissedProofOutputs[2].UnlockHash {
+		return errors.New("lost collateral address was changed")
 	}
 
 	// Determine the amount that was transferred from the renter.

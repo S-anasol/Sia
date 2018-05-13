@@ -28,6 +28,10 @@ type ErasureCoder interface {
 	// containing parity data.
 	Encode(data []byte) ([][]byte, error)
 
+	// EncodeShards encodes the input data like Encode but accepts an already
+	// sharded input.
+	EncodeShards(data [][]byte) ([][]byte, error)
+
 	// Recover recovers the original data from pieces and writes it to w.
 	// pieces should be identical to the slice returned by Encode (length and
 	// order must be preserved), but with missing elements set to nil. n is
@@ -55,19 +59,18 @@ type ContractUtility struct {
 // DownloadInfo provides information about a file that has been requested for
 // download.
 type DownloadInfo struct {
-	SiaPath     string         `json:"siapath"`
-	Destination DownloadWriter `json:"destination"`
-	Filesize    uint64         `json:"filesize"`
-	Received    uint64         `json:"received"`
-	StartTime   time.Time      `json:"starttime"`
-	Error       string         `json:"error"`
-}
+	Destination     string `json:"destination"`     // The destination of the download.
+	DestinationType string `json:"destinationtype"` // Can be "file", "memory buffer", or "http stream".
+	Length          uint64 `json:"length"`          // The length requested for the download.
+	Offset          uint64 `json:"offset"`          // The offset within the siafile requested for the download.
+	SiaPath         string `json:"siapath"`         // The siapath of the file used for the download.
 
-// DownloadWriter provides an interface which all output writers have to implement.
-type DownloadWriter interface {
-	WriteAt(b []byte, off int64) (int, error)
-	Destination() string
-	Close() error
+	Completed            bool      `json:"completed"`            // Whether or not the download has completed.
+	EndTime              time.Time `json:"endtime"`              // The time when the download fully completed.
+	Error                string    `json:"error"`                // Will be the empty string unless there was an error.
+	Received             uint64    `json:"received"`             // Amount of data confirmed and decoded.
+	StartTime            time.Time `json:"starttime"`            // The time when the download was started.
+	TotalDataTransferred uint64    `json:"totaldatatransferred"` // Total amount of data transferred, including negotiation, etc.
 }
 
 // FileUploadParams contains the information used by the Renter to upload a
@@ -164,7 +167,9 @@ type RenterPriceEstimation struct {
 
 // RenterSettings control the behavior of the Renter.
 type RenterSettings struct {
-	Allowance Allowance `json:"allowance"`
+	Allowance        Allowance `json:"allowance"`
+	MaxUploadSpeed   int64     `json:"maxuploadspeed"`
+	MaxDownloadSpeed int64     `json:"maxdownloadspeed"`
 }
 
 // HostDBScans represents a sortable slice of scans.
@@ -232,11 +237,15 @@ type RenterContract struct {
 	StorageSpending  types.Currency
 	UploadSpending   types.Currency
 
+	// Utility contains utility information about the renter.
+	Utility ContractUtility
+
 	// TotalCost indicates the amount of money that the renter spent and/or
 	// locked up while forming a contract. This includes fees, and includes
 	// funds which were allocated (but not necessarily committed) to spend on
 	// uploads/downloads/storage.
-	//
+	TotalCost types.Currency
+
 	// ContractFee is the amount of money paid to the host to cover potential
 	// future transaction fees that the host may incur, and to cover any other
 	// overheads the host may have.
@@ -248,7 +257,6 @@ type RenterContract struct {
 	// contract. The siafund fee that the renter pays covers both the renter and
 	// the host portions of the contract, and therefore can be unexpectedly high
 	// if the the host collateral is high.
-	TotalCost   types.Currency
 	ContractFee types.Currency
 	TxnFee      types.Currency
 	SiafundFee  types.Currency
@@ -257,11 +265,24 @@ type RenterContract struct {
 // ContractorSpending contains the metrics about how much the Contractor has
 // spent during the current billing period.
 type ContractorSpending struct {
-	ContractSpending types.Currency `json:"contractspending"`
+	// ContractFees are the sum of all fees in the contract. This means it
+	// includes the ContractFee, TxnFee and SiafundFee
+	ContractFees types.Currency `json:"contractfees"`
+	// DownloadSpending is the money currently spent on downloads.
 	DownloadSpending types.Currency `json:"downloadspending"`
-	StorageSpending  types.Currency `json:"storagespending"`
-	UploadSpending   types.Currency `json:"uploadspending"`
-	Unspent          types.Currency `json:"unspent"`
+	// StorageSpending is the money currently spent on storage.
+	StorageSpending types.Currency `json:"storagespending"`
+	// ContractSpending is the total amount of money that the renter has put
+	// into contracts, whether it's locked and the renter gets that money
+	// back or whether it's spent and the renter won't get the money back.
+	TotalAllocated types.Currency `json:"totalallocated"`
+	// UploadSpending is the money currently spent on uploads.
+	UploadSpending types.Currency `json:"uploadspending"`
+	// Unspent is locked-away, unspent money.
+	Unspent types.Currency `json:"unspent"`
+	// ContractSpendingDeprecated was renamed to TotalAllocated and always has the
+	// same value as TotalAllocated.
+	ContractSpendingDeprecated types.Currency `json:"contractspending"`
 }
 
 // A Renter uploads, tracks, repairs, and downloads a set of files for the
@@ -280,6 +301,9 @@ type Renter interface {
 	// Contracts returns the contracts formed by the renter.
 	Contracts() []RenterContract
 
+	// ContractUtility provides the contract utility for a given id
+	ContractUtility(id types.FileContractID) (ContractUtility, bool)
+
 	// CurrentPeriod returns the height at which the current allowance period
 	// began.
 	CurrentPeriod() types.BlockHeight
@@ -295,8 +319,15 @@ type Renter interface {
 	// downloads of `offset` and `length` type.
 	Download(params RenterDownloadParameters) error
 
-	// DownloadQueue lists all the files that have been scheduled for download.
-	DownloadQueue() []DownloadInfo
+	// Download performs a download according to the parameters passed without
+	// blocking, including downloads of `offset` and `length` type.
+	DownloadAsync(params RenterDownloadParameters) error
+
+	// DownloadHistory lists all the files that have been scheduled for download.
+	DownloadHistory() []DownloadInfo
+
+	// File returns information on specific file queried by user
+	File(siaPath string) (FileInfo, error)
 
 	// FileList returns information on all of the files stored by the renter.
 	FileList() []FileInfo
@@ -308,9 +339,9 @@ type Renter interface {
 	// contain multiple files. The paths of the added files are returned.
 	LoadSharedFiles(source string) ([]string, error)
 
-	// LoadSharedFilesAscii loads an ASCII-encoded '.sia' file into the
+	// LoadSharedFilesASCII loads an ASCII-encoded '.sia' file into the
 	// renter.
-	LoadSharedFilesAscii(asciiSia string) ([]string, error)
+	LoadSharedFilesASCII(asciiSia string) ([]string, error)
 
 	// PriceEstimation estimates the cost in siacoins of performing various
 	// storage and data operations.
@@ -337,7 +368,12 @@ type Renter interface {
 	ShareFiles(paths []string, shareDest string) error
 
 	// ShareFilesAscii creates an ASCII-encoded '.sia' file.
-	ShareFilesAscii(paths []string) (asciiSia string, err error)
+	ShareFilesASCII(paths []string) (asciiSia string, err error)
+
+	// Streamer creates a io.ReadSeeker that can be used to stream downloads
+	// from the Sia network and also returns the fileName of the streamed
+	// resource.
+	Streamer(siaPath string) (string, io.ReadSeeker, error)
 
 	// Upload uploads a file using the input parameters.
 	Upload(FileUploadParams) error
@@ -350,6 +386,6 @@ type RenterDownloadParameters struct {
 	Httpwriter  io.Writer
 	Length      uint64
 	Offset      uint64
-	Siapath     string
+	SiaPath     string
 	Destination string
 }

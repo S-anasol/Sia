@@ -16,7 +16,10 @@ var (
 // wallet outputs into a single new address.
 func (w *Wallet) managedCreateDefragTransaction() ([]types.Transaction, error) {
 	// dustThreshold and minFee have to be obtained separate from the lock
-	dustThreshold := w.DustThreshold()
+	dustThreshold, err := w.DustThreshold()
+	if err != nil {
+		return nil, err
+	}
 	minFee, _ := w.tpool.FeeEstimation()
 
 	w.mu.Lock()
@@ -128,6 +131,11 @@ func (w *Wallet) managedCreateDefragTransaction() ([]types.Transaction, error) {
 // operation is only performed if the wallet has greater than defragThreshold
 // outputs.
 func (w *Wallet) threadedDefragWallet() {
+	// Don't defrag if it was disabled
+	if w.defragDisabled {
+		return
+	}
+
 	err := w.tg.Add()
 	if err != nil {
 		return
@@ -177,6 +185,6 @@ func (w *Wallet) threadedDefragWallet() {
 	}
 	w.log.Println("Submitting a transaction set to defragment the wallet's outputs, IDs:")
 	for _, txn := range txnSet {
-		w.log.Println("\t", txn.ID())
+		w.log.Println("Wallet defrag: \t", txn.ID())
 	}
 }

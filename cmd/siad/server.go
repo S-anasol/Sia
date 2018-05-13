@@ -18,9 +18,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	"github.com/NebulousLabs/Sia/api"
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/modules/consensus"
@@ -31,6 +31,7 @@ import (
 	"github.com/NebulousLabs/Sia/modules/renter"
 	"github.com/NebulousLabs/Sia/modules/transactionpool"
 	"github.com/NebulousLabs/Sia/modules/wallet"
+	"github.com/NebulousLabs/Sia/node/api"
 	"github.com/NebulousLabs/Sia/types"
 
 	"github.com/inconshreveable/go-update"
@@ -78,13 +79,22 @@ type (
 		RootTarget types.Target `json:"roottarget"`
 		RootDepth  types.Target `json:"rootdepth"`
 
+		// DEPRECATED: same values as MaxTargetAdjustmentUp and
+		// MaxTargetAdjustmentDown.
 		MaxAdjustmentUp   *big.Rat `json:"maxadjustmentup"`
 		MaxAdjustmentDown *big.Rat `json:"maxadjustmentdown"`
 
+		MaxTargetAdjustmentUp   *big.Rat `json:"maxtargetadjustmentup"`
+		MaxTargetAdjustmentDown *big.Rat `json:"maxtargetadjustmentdown"`
+
 		SiacoinPrecision types.Currency `json:"siacoinprecision"`
 	}
+
+	// DaemonVersion holds the version information for siad
 	DaemonVersion struct {
-		Version string `json:"version"`
+		Version     string `json:"version"`
+		GitRevision string `json:"gitrevision"`
+		BuildTime   string `json:"buildtime"`
 	}
 	// UpdateInfo indicates whether an update is available, and to what
 	// version.
@@ -344,8 +354,13 @@ func (srv *Server) daemonConstantsHandler(w http.ResponseWriter, _ *http.Request
 		RootTarget: types.RootTarget,
 		RootDepth:  types.RootDepth,
 
-		MaxAdjustmentUp:   types.MaxAdjustmentUp,
-		MaxAdjustmentDown: types.MaxAdjustmentDown,
+		// DEPRECATED: same values as MaxTargetAdjustmentUp and
+		// MaxTargetAdjustmentDown.
+		MaxAdjustmentUp:   types.MaxTargetAdjustmentUp,
+		MaxAdjustmentDown: types.MaxTargetAdjustmentDown,
+
+		MaxTargetAdjustmentUp:   types.MaxTargetAdjustmentUp,
+		MaxTargetAdjustmentDown: types.MaxTargetAdjustmentDown,
 
 		SiacoinPrecision: types.SiacoinPrecision,
 	}
@@ -355,7 +370,7 @@ func (srv *Server) daemonConstantsHandler(w http.ResponseWriter, _ *http.Request
 
 // daemonVersionHandler handles the API call that requests the daemon's version.
 func (srv *Server) daemonVersionHandler(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
-	api.WriteJSON(w, DaemonVersion{Version: build.Version})
+	api.WriteJSON(w, DaemonVersion{Version: build.Version, GitRevision: build.GitRevision, BuildTime: build.BuildTime})
 }
 
 // daemonStopHandler handles the API call to stop the daemon cleanly.
@@ -412,6 +427,10 @@ func NewServer(config Config) (*Server, error) {
 	// Create the listener for the server
 	l, err := net.Listen("tcp", config.Siad.APIaddr)
 	if err != nil {
+		if isAddrInUseErr(err) {
+			return nil, fmt.Errorf("%v; are you running another instance of siad?", err.Error())
+		}
+
 		return nil, err
 	}
 
@@ -447,6 +466,16 @@ func NewServer(config Config) (*Server, error) {
 	mux.HandleFunc("/", srv.apiHandler)
 
 	return srv, nil
+}
+
+// isAddrInUseErr checks if the error corresponds to syscall.EADDRINUSE
+func isAddrInUseErr(err error) bool {
+	if opErr, ok := err.(*net.OpError); ok {
+		if syscallErr, ok := opErr.Err.(*os.SyscallError); ok {
+			return syscallErr.Err == syscall.EADDRINUSE
+		}
+	}
+	return false
 }
 
 // loadModules loads the modules defined by the server's config and makes their
@@ -571,6 +600,7 @@ func (srv *Server) loadModules() error {
 	return nil
 }
 
+// Serve starts the HTTP server
 func (srv *Server) Serve() error {
 	// The server will run until an error is encountered or the listener is
 	// closed, via either the Close method or the signal handling above.
