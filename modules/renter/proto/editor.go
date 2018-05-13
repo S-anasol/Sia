@@ -11,6 +11,7 @@ import (
 	"github.com/NebulousLabs/Sia/encoding"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
+	"github.com/NebulousLabs/ratelimit"
 )
 
 // cachedMerkleRoot calculates the root of a set of existing Merkle roots.
@@ -90,13 +91,12 @@ func (he *Editor) Upload(data []byte) (_ modules.RenterContract, _ crypto.Hash, 
 
 	// calculate the new Merkle root
 	sectorRoot := crypto.MerkleRoot(data)
-	newRoots := append(sc.merkleRoots, sectorRoot)
-	merkleRoot := cachedMerkleRoot(newRoots)
+	merkleRoot := sc.merkleRoots.checkNewRoot(sectorRoot)
 
 	// create the action and revision
 	actions := []modules.RevisionAction{{
 		Type:        modules.ActionInsert,
-		SectorIndex: uint64(len(sc.merkleRoots)),
+		SectorIndex: uint64(sc.merkleRoots.len()),
 		Data:        data,
 	}}
 	rev := newUploadRevision(contract.LastRevision(), merkleRoot, sectorPrice, sectorCollateral)
@@ -174,11 +174,11 @@ func (cs *ContractSet) NewEditor(host modules.HostDBEntry, id types.FileContract
 		}
 	}()
 
-	conn, closeChan, err := initiateRevisionLoop(host, contract, modules.RPCReviseContract, cancel)
+	conn, closeChan, err := initiateRevisionLoop(host, contract, modules.RPCReviseContract, cancel, cs.rl)
 	if IsRevisionMismatch(err) && len(sc.unappliedTxns) > 0 {
 		// we have desynced from the host. If we have unapplied updates from the
 		// WAL, try applying them.
-		conn, closeChan, err = initiateRevisionLoop(host, sc.unappliedHeader(), modules.RPCReviseContract, cancel)
+		conn, closeChan, err = initiateRevisionLoop(host, sc.unappliedHeader(), modules.RPCReviseContract, cancel, cs.rl)
 		if err != nil {
 			return nil, err
 		}
@@ -209,14 +209,15 @@ func (cs *ContractSet) NewEditor(host modules.HostDBEntry, id types.FileContract
 
 // initiateRevisionLoop initiates either the editor or downloader loop with
 // host, depending on which rpc was passed.
-func initiateRevisionLoop(host modules.HostDBEntry, contract contractHeader, rpc types.Specifier, cancel <-chan struct{}) (net.Conn, chan struct{}, error) {
-	conn, err := (&net.Dialer{
+func initiateRevisionLoop(host modules.HostDBEntry, contract contractHeader, rpc types.Specifier, cancel <-chan struct{}, rl *ratelimit.RateLimit) (net.Conn, chan struct{}, error) {
+	c, err := (&net.Dialer{
 		Cancel:  cancel,
 		Timeout: 45 * time.Second, // TODO: Constant
 	}).Dial("tcp", string(host.NetAddress))
 	if err != nil {
 		return nil, nil, err
 	}
+	conn := ratelimit.NewRLConn(c, rl, cancel)
 
 	closeChan := make(chan struct{})
 	go func() {

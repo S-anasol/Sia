@@ -12,7 +12,7 @@ import (
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 const (
@@ -57,21 +57,21 @@ var (
 
 	// relayHeaderTimeout is the timeout for the RelayHeader RPC.
 	relayHeaderTimeout = build.Select(build.Var{
-		Standard: 3 * time.Minute,
+		Standard: 60 * time.Second,
 		Dev:      20 * time.Second,
 		Testing:  3 * time.Second,
 	}).(time.Duration)
 
-	// sendBlkTimeout is the timeout for the SendBlocks RPC.
+	// sendBlkTimeout is the timeout for the SendBlk RPC.
 	sendBlkTimeout = build.Select(build.Var{
-		Standard: 4 * time.Minute,
+		Standard: 90 * time.Second,
 		Dev:      30 * time.Second,
 		Testing:  4 * time.Second,
 	}).(time.Duration)
 
 	// sendBlocksTimeout is the timeout for the SendBlocks RPC.
 	sendBlocksTimeout = build.Select(build.Var{
-		Standard: 5 * time.Minute,
+		Standard: 180 * time.Second,
 		Dev:      40 * time.Second,
 		Testing:  5 * time.Second,
 	}).(time.Duration)
@@ -135,7 +135,7 @@ func blockHistory(tx *bolt.Tx) (blockIDs [32]types.BlockID) {
 // managedReceiveBlocks is the calling end of the SendBlocks RPC, without the
 // threadgroup wrapping.
 func (cs *ConsensusSet) managedReceiveBlocks(conn modules.PeerConn) (returnErr error) {
-	// Set a deadline after which SendBlocks will timeout. During IBD, esepcially,
+	// Set a deadline after which SendBlocks will timeout. During IBD, especially,
 	// SendBlocks will timeout. This is by design so that IBD switches peers to
 	// prevent any one peer from stalling IBD.
 	err := conn.SetDeadline(time.Now().Add(sendBlocksTimeout))

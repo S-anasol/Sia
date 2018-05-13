@@ -24,8 +24,8 @@ var (
 // contractCollateral returns the amount of collateral that the host is
 // expected to add to the file contract based on the payout of the file
 // contract and based on the host settings.
-func contractCollateral(settings modules.HostInternalSettings, fc types.FileContract) types.Currency {
-	return fc.ValidProofOutputs[1].Value.Sub(settings.MinContractPrice)
+func contractCollateral(settings modules.HostExternalSettings, fc types.FileContract) types.Currency {
+	return fc.ValidProofOutputs[1].Value.Sub(settings.ContractPrice)
 }
 
 // managedAddCollateral adds the host's collateral to the file contract
@@ -33,15 +33,22 @@ func contractCollateral(settings modules.HostInternalSettings, fc types.FileCont
 // transaction, as well as any new parents that get added to the transaction
 // set. The builder that is used to add the collateral is also returned,
 // because the new transaction has not yet been signed.
-func (h *Host) managedAddCollateral(settings modules.HostInternalSettings, txnSet []types.Transaction) (builder modules.TransactionBuilder, newParents []types.Transaction, newInputs []types.SiacoinInput, newOutputs []types.SiacoinOutput, err error) {
+func (h *Host) managedAddCollateral(settings modules.HostExternalSettings, txnSet []types.Transaction) (builder modules.TransactionBuilder, newParents []types.Transaction, newInputs []types.SiacoinInput, newOutputs []types.SiacoinOutput, err error) {
 	txn := txnSet[len(txnSet)-1]
 	parents := txnSet[:len(txnSet)-1]
 	fc := txn.FileContracts[0]
 	hostPortion := contractCollateral(settings, fc)
-	builder = h.wallet.RegisterTransaction(txn, parents)
+	builder, err = h.wallet.RegisterTransaction(txn, parents)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if err != nil {
+			builder.Drop()
+		}
+	}()
 	err = builder.FundSiacoins(hostPortion)
 	if err != nil {
-		builder.Drop()
 		return nil, nil, nil, nil, extendErr("could not add collateral: ", ErrorInternal(err.Error()))
 	}
 
@@ -73,9 +80,9 @@ func (h *Host) managedRPCFormContract(conn net.Conn) error {
 	// If the host is not accepting contracts, the connection can be closed.
 	// The renter has been given enough information in the host settings to
 	// understand that the connection is going to be closed.
-	h.mu.RLock()
-	settings := h.settings
-	h.mu.RUnlock()
+	h.mu.Lock()
+	settings := h.externalSettings()
+	h.mu.Unlock()
 	if !settings.AcceptingContracts {
 		h.log.Debugln("Turning down contract because the host is not accepting contracts.")
 		return nil
@@ -108,7 +115,7 @@ func (h *Host) managedRPCFormContract(conn net.Conn) error {
 
 	// The host verifies that the file contract coming over the wire is
 	// acceptable.
-	err = h.managedVerifyNewContract(txnSet, renterPK)
+	err = h.managedVerifyNewContract(txnSet, renterPK, settings)
 	if err != nil {
 		// The incoming file contract is not acceptable to the host, indicate
 		// why to the renter.
@@ -169,9 +176,9 @@ func (h *Host) managedRPCFormContract(conn net.Conn) error {
 	// During finalization, the signature for the revision is also checked, and
 	// signatures for the revision transaction are created.
 	h.mu.RLock()
-	hostCollateral := contractCollateral(h.settings, txnSet[len(txnSet)-1].FileContracts[0])
+	hostCollateral := contractCollateral(settings, txnSet[len(txnSet)-1].FileContracts[0])
 	h.mu.RUnlock()
-	hostTxnSignatures, hostRevisionSignature, newSOID, err := h.managedFinalizeContract(txnBuilder, renterPK, renterTxnSignatures, renterRevisionSignature, nil, hostCollateral, types.ZeroCurrency, types.ZeroCurrency)
+	hostTxnSignatures, hostRevisionSignature, newSOID, err := h.managedFinalizeContract(txnBuilder, renterPK, renterTxnSignatures, renterRevisionSignature, nil, hostCollateral, types.ZeroCurrency, types.ZeroCurrency, settings)
 	if err != nil {
 		// The incoming file contract is not acceptable to the host, indicate
 		// why to the renter.
@@ -198,7 +205,7 @@ func (h *Host) managedRPCFormContract(conn net.Conn) error {
 
 // managedVerifyNewContract checks that an incoming file contract matches the host's
 // expectations for a valid contract.
-func (h *Host) managedVerifyNewContract(txnSet []types.Transaction, renterPK crypto.PublicKey) error {
+func (h *Host) managedVerifyNewContract(txnSet []types.Transaction, renterPK crypto.PublicKey, eSettings modules.HostExternalSettings) error {
 	// Check that the transaction set is not empty.
 	if len(txnSet) < 1 {
 		return extendErr("zero-length transaction set: ", errEmptyObject)
@@ -212,7 +219,7 @@ func (h *Host) managedVerifyNewContract(txnSet []types.Transaction, renterPK cry
 	blockHeight := h.blockHeight
 	lockedStorageCollateral := h.financialMetrics.LockedStorageCollateral
 	publicKey := h.publicKey
-	settings := h.settings
+	iSettings := h.settings
 	unlockHash := h.unlockHash
 	h.mu.RUnlock()
 	fc := txnSet[len(txnSet)-1].FileContracts[0]
@@ -232,12 +239,12 @@ func (h *Host) managedVerifyNewContract(txnSet []types.Transaction, renterPK cry
 	}
 	// WindowEnd must be at least settings.WindowSize blocks after
 	// WindowStart.
-	if fc.WindowEnd < fc.WindowStart+settings.WindowSize {
+	if fc.WindowEnd < fc.WindowStart+eSettings.WindowSize {
 		return errSmallWindow
 	}
 	// WindowEnd must not be more than settings.MaxDuration blocks into the
 	// future.
-	if fc.WindowStart > blockHeight+settings.MaxDuration {
+	if fc.WindowEnd > blockHeight+eSettings.MaxDuration {
 		return errLongDuration
 	}
 
@@ -261,18 +268,18 @@ func (h *Host) managedVerifyNewContract(txnSet []types.Transaction, renterPK cry
 	// Check that there's enough payout for the host to cover at least the
 	// contract price. This will prevent negative currency panics when working
 	// with the collateral.
-	if fc.ValidProofOutputs[1].Value.Cmp(settings.MinContractPrice) < 0 {
+	if fc.ValidProofOutputs[1].Value.Cmp(eSettings.ContractPrice) < 0 {
 		return errLowHostValidOutput
 	}
 	// Check that the collateral does not exceed the maximum amount of
 	// collateral allowed.
-	expectedCollateral := contractCollateral(settings, fc)
-	if expectedCollateral.Cmp(settings.MaxCollateral) > 0 {
+	expectedCollateral := contractCollateral(eSettings, fc)
+	if expectedCollateral.Cmp(eSettings.MaxCollateral) > 0 {
 		return errMaxCollateralReached
 	}
 	// Check that the host has enough room in the collateral budget to add this
 	// collateral.
-	if lockedStorageCollateral.Add(expectedCollateral).Cmp(settings.CollateralBudget) > 0 {
+	if lockedStorageCollateral.Add(expectedCollateral).Cmp(iSettings.CollateralBudget) > 0 {
 		return errCollateralBudgetExceeded
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/encoding"
+	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/fastrand"
 )
 
@@ -27,6 +28,7 @@ func newTestingFile() *file {
 		masterKey:   crypto.GenerateTwofishKey(),
 		erasureCode: rsc,
 		pieceSize:   encoding.DecUint64(data[6:8]),
+		staticUID:   persist.RandomSuffix(),
 	}
 }
 
@@ -156,7 +158,7 @@ func TestFileShareLoadASCII(t *testing.T) {
 	rt.renter.files[savedFile.name] = savedFile
 	rt.renter.mu.Unlock(id)
 
-	ascii, err := rt.renter.ShareFilesAscii([]string{savedFile.name})
+	ascii, err := rt.renter.ShareFilesASCII([]string{savedFile.name})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +166,7 @@ func TestFileShareLoadASCII(t *testing.T) {
 	// Remove the file from the renter.
 	delete(rt.renter.files, savedFile.name)
 
-	names, err := rt.renter.LoadSharedFilesAscii(ascii)
+	names, err := rt.renter.LoadSharedFilesASCII(ascii)
 	if err != nil {
 		t.Fatal(err)
 	}

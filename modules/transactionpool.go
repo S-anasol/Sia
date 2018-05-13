@@ -124,6 +124,15 @@ type (
 		// that make this condition necessary.
 		PurgeTransactionPool()
 
+		// Transaction returns the transaction and unconfirmed parents
+		// corresponding to the provided transaction id.
+		Transaction(id types.TransactionID) (txn types.Transaction, unconfirmedParents []types.Transaction, exists bool)
+
+		// TransactionConfirmed returns true if the transaction has been seen on the
+		// blockchain. Note, however, that the block containing the transaction may
+		// later be invalidated by a reorg.
+		TransactionConfirmed(id types.TransactionID) (bool, error)
+
 		// TransactionList returns a list of all transactions in the transaction
 		// pool. The transactions are provided in an order that can acceptably be
 		// put into a block.
@@ -134,9 +143,9 @@ type (
 		// transaction pool changes, and should not subscribe to both.
 		TransactionPoolSubscribe(TransactionPoolSubscriber)
 
-		// Transaction returns the transaction and unconfirmed parents
-		// corresponding to the provided transaction id.
-		Transaction(id types.TransactionID) (txn types.Transaction, unconfirmedParents []types.Transaction, exists bool)
+		// TransactionSet returns the transaction set the provided object
+		// appears in.
+		TransactionSet(crypto.Hash) []types.Transaction
 
 		// Unsubscribe removes a subscriber from the transaction pool.
 		// This is necessary for clean shutdown of the miner.

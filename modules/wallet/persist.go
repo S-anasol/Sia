@@ -13,7 +13,7 @@ import (
 	"github.com/NebulousLabs/Sia/types"
 	"github.com/NebulousLabs/fastrand"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 const (
@@ -123,9 +123,7 @@ func (w *Wallet) initPersist() error {
 	if err != nil {
 		return err
 	}
-	w.tg.AfterStop(func() { w.db.Close() })
-
-	return nil
+	return w.tg.AfterStop(func() error { return w.db.Close() })
 }
 
 // createBackup copies the wallet database to dst.

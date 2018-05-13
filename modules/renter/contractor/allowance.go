@@ -43,6 +43,9 @@ func (c *Contractor) SetAllowance(a modules.Allowance) error {
 	if reflect.DeepEqual(a, modules.Allowance{}) {
 		return c.managedCancelAllowance()
 	}
+	if reflect.DeepEqual(a, c.allowance) {
+		return nil
+	}
 
 	// sanity checks
 	if a.Hosts == 0 {
@@ -83,8 +86,8 @@ func (c *Contractor) managedCancelAllowance() error {
 	c.log.Println("INFO: canceling allowance")
 	// first need to invalidate any active editors/downloaders
 	// NOTE: this code is the same as in managedRenewContracts
+	ids := c.staticContracts.IDs()
 	c.mu.Lock()
-	ids := c.contracts.IDs()
 	for _, id := range ids {
 		// we aren't renewing, but we don't want new editors or downloaders to
 		// be created
@@ -125,13 +128,13 @@ func (c *Contractor) managedCancelAllowance() error {
 	c.managedInterruptContractMaintenance()
 
 	// Cycle through all contracts and delete them.
-	ids = c.contracts.IDs()
+	ids = c.staticContracts.IDs()
 	for _, id := range ids {
-		contract, exists := c.contracts.Acquire(id)
+		contract, exists := c.staticContracts.Acquire(id)
 		if !exists {
 			continue
 		}
-		c.contracts.Delete(contract)
+		c.staticContracts.Delete(contract)
 	}
 	return nil
 }

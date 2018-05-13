@@ -1,4 +1,4 @@
-# [![Sia Logo](http://sia.tech/img/svg/sia-green-logo.svg)](http://sia.tech) v1.3.1 (Capricorn)
+# [![Sia Logo](http://sia.tech/img/svg/sia-green-logo.svg)](http://sia.tech) v1.3.3 (Capricorn)
 
 [![Build Status](https://travis-ci.org/NebulousLabs/Sia.svg?branch=master)](https://travis-ci.org/NebulousLabs/Sia)
 [![GoDoc](https://godoc.org/github.com/NebulousLabs/Sia?status.svg)](https://godoc.org/github.com/NebulousLabs/Sia)
@@ -88,7 +88,7 @@ files, and advertise yourself as a host.
 Building From Source
 --------------------
 
-To build from source, [Go 1.9 must be installed](https://golang.org/doc/install)
+To build from source, [Go 1.10 must be installed](https://golang.org/doc/install)
 on the system. Make sure your `$GOPATH` is set, and then simply use `go get`:
 
 ```
@@ -100,7 +100,7 @@ This will download the Sia repo to your `$GOPATH/src` folder and install the
 
 To stay up-to-date, run the previous `go get` command again. Alternatively, you
 can use the Makefile provided in this repo. Run `git pull origin master` to
-pull the latest changes, and `make release-std` to build the new binaries. You
+pull the latest changes, and `make release` to build the new binaries. You
 can also run `make test` and `make test-long` to run the short and full test
 suites, respectively. Finally, `make cover` will generate code coverage reports
 for each package; they are stored in the `cover` folder and can be viewed in

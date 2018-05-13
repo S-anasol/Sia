@@ -37,31 +37,31 @@ var (
 	}
 )
 
-type updateInfo struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version"`
-}
-
-type daemonVersion struct {
-	Version string
-}
-
 // version prints the version of siac and siad.
 func versioncmd() {
-	fmt.Println("Sia Client v" + build.Version)
-	var versioninfo daemonVersion
-	err := getAPI("/daemon/version", &versioninfo)
+	fmt.Println("Sia Client")
+	fmt.Println("\tVersion " + build.Version)
+	if build.GitRevision != "" {
+		fmt.Println("\tGit Revision " + build.GitRevision)
+		fmt.Println("\tBuild Time   " + build.BuildTime)
+	}
+	dvg, err := httpClient.DaemonVersionGet()
 	if err != nil {
 		fmt.Println("Could not get daemon version:", err)
 		return
 	}
-	fmt.Println("Sia Daemon v" + versioninfo.Version)
+	fmt.Println("Sia Daemon")
+	fmt.Println("\tVersion " + dvg.Version)
+	if build.GitRevision != "" {
+		fmt.Println("\tGit Revision " + dvg.GitRevision)
+		fmt.Println("\tBuild Time   " + dvg.BuildTime)
+	}
 }
 
 // stopcmd is the handler for the command `siac stop`.
 // Stops the daemon.
 func stopcmd() {
-	err := get("/daemon/stop")
+	err := httpClient.DaemonStopGet()
 	if err != nil {
 		die("Could not stop daemon:", err)
 	}
@@ -69,8 +69,7 @@ func stopcmd() {
 }
 
 func updatecmd() {
-	var update updateInfo
-	err := getAPI("/daemon/update", &update)
+	update, err := httpClient.DaemonUpdateGet()
 	if err != nil {
 		fmt.Println("Could not check for update:", err)
 		return
@@ -80,7 +79,7 @@ func updatecmd() {
 		return
 	}
 
-	err = post("/daemon/update", "")
+	err = httpClient.DaemonUpdatePost()
 	if err != nil {
 		fmt.Println("Could not apply update:", err)
 		return
@@ -89,8 +88,7 @@ func updatecmd() {
 }
 
 func updatecheckcmd() {
-	var update updateInfo
-	err := getAPI("/daemon/update", &update)
+	update, err := httpClient.DaemonUpdateGet()
 	if err != nil {
 		fmt.Println("Could not check for update:", err)
 		return

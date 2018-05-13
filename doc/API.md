@@ -128,8 +128,8 @@ returns the set of constants in use.
   "roottarget": [0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
   "rootdepth":  [255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255],
 
-  "maxadjustmentup":   "5/2",
-  "maxadjustmentdown": "2/5",
+  "maxtargetadjustmentup":   "5/2",
+  "maxtargetadjustmentdown": "2/5",
 
   "siacoinprecision": "1000000000000000000000000" // hastings per siacoin
 }
@@ -160,6 +160,7 @@ Consensus
 | Route                                                                       | HTTP verb |
 | --------------------------------------------------------------------------- | --------- |
 | [/consensus](#consensus-get)                                                | GET       |
+| [/consensus/blocks](#consensusblocks-get)                                   | GET       |
 | [/consensus/validate/transactionset](#consensusvalidatetransactionset-post) | POST      |
 
 For examples and detailed descriptions of request and response parameters,
@@ -177,6 +178,102 @@ returns information about the consensus set, such as the current block height.
   "currentblock": "00000000000008a84884ba827bdc868a17ba9c14011de33ff763bd95779a9cf1",
   "target":       [0,0,0,0,0,0,11,48,125,79,116,89,136,74,42,27,5,14,10,31,23,53,226,238,202,219,5,204,38,32,59,165],
   "difficulty":   "1234"
+}
+```
+
+#### /consensus/blocks [GET]
+
+Returns the block for a given id or height.
+
+###### Query String Parameters
+One of the following parameters can be specified.
+```
+// BlockID of the requested block.
+id 
+
+// BlockHeight of the requested block.
+height
+
+```
+
+###### Response
+The JSON formatted block or a standard error response.
+```
+{
+    "height": 20032,
+    "id": "00000000000033b9eb57fa63a51adeea857e70f6415ebbfe5df2a01f0d0477f4",
+    "minerpayouts": [
+        {
+            "unlockhash": "c199cd180e19ef7597bcf4beecdd4f211e121d085e24432959c42bdf9030e32b9583e1c2727c",
+            "value": "279978000000000000000000000000"
+        }
+    ],
+    "nonce": [4,12,219,7,0,0,0,0],
+    "parentid": "0000000000009615e8db750eb1226aa5e629bfa7badbfe0b79607ec8b918a44c",
+    "timestamp": 1444516982,
+    "transactions": [
+	{
+	    // ...
+	}
+        {
+            "arbitrarydata": [],
+            "filecontractrevisions": [],
+            "filecontracts": [],
+            "minerfees": [],
+            "siacoininputs": [
+                {
+                    "parentid": "24cbeb9df7eb2d81d0025168fc94bd179909d834f49576e65b51feceaf957a64",
+                    "unlockconditions": {
+                        "publickeys": [
+                            {
+                                "algorithm": "ed25519",
+                                "key": "QET8w7WRbGfcnnpKd1nuQfE3DuNUUq9plyoxwQYDK4U="
+                            }
+                        ],
+                        "signaturesrequired": 1,
+                        "timelock": 0
+                    }
+                }
+            ],
+            "siacoinoutputs": [
+                {
+                    "unlockhash": "d54f500f6c1774d518538dbe87114fe6f7e6c76b5bc8373a890b12ce4b8909a336106a4cd6db",
+                    "value": "1010000000000000000000000000"
+                },
+                {
+                    "unlockhash": "48a56b19bd0be4f24190640acbd0bed9669ea9c18823da2645ec1ad9652f10b06c5d4210f971",
+                    "value": "5780000000000000000000000000"
+                }
+            ],
+            "siafundinputs": [],
+            "siafundoutputs": [],
+            "storageproofs": [],
+            "transactionsignatures": [
+                {
+                    "coveredfields": {
+                        "arbitrarydata": [],
+                        "filecontractrevisions": [],
+                        "filecontracts": [],
+                        "minerfees": [],
+                        "siacoininputs": [],
+                        "siacoinoutputs": [],
+                        "siafundinputs": [],
+                        "siafundoutputs": [],
+                        "storageproofs": [],
+                        "transactionsignatures": [],
+                        "wholetransaction": true
+                    },
+                    "parentid": "24cbeb9df7eb2d81d0025168fc94bd179909d834f49576e65b51feceaf957a64",
+                    "publickeyindex": 0,
+                    "signature": "pByLGMlvezIZWVZmHQs/ynGETETNbxcOY/kr6uivYgqZqCcKTJ0JkWhcFaKJU+3DEA7JAloLRNZe3PTklD3tCQ==",
+                    "timelock": 0
+                }
+            ]
+        },
+        {
+	    // ...
+        }
+    ]
 }
 ```
 
@@ -257,6 +354,7 @@ Host
 | [/host](#host-get)                                                                         | GET       |
 | [/host](#host-post)                                                                        | POST      |
 | [/host/announce](#hostannounce-post)                                                       | POST      |
+| [/host/contracts](#hostcontracts-get)							     | GET	 |
 | [/host/estimatescore](#hostestimatescore-get)                                              | GET       |
 | [/host/storage](#hoststorage-get)                                                          | GET       |
 | [/host/storage/folders/add](#hoststoragefoldersadd-post)                                   | POST      |
@@ -392,11 +490,46 @@ netaddress string // Optional
 standard success or error response. See
 [#standard-responses](#standard-responses).
 
+#### /host/contracts [GET]
+
+gets a list of all contracts from the host database
+
+###### JSON Response [(with comments)](/doc/api/Host.md#json-response-1)
+```javascript
+{
+  "contracts": [
+    {
+      "contractcost":			"1234",		// hastings
+      "datasize":			500000,		// bytes
+      "lockedcollateral":		"1234",		// hastings
+      "obligationid":			"fff48010dcbbd6ba7ffd41bc4b25a3634ee58bbf688d2f06b7d5a0c837304e13",
+      "potentialdownloadrevenue":	"1234",		// hastings
+      "potentialstoragerevenue":	"1234",		// hastings
+      "potentialuploadrevenue":		"1234",		// hastings
+      "riskedcollateral":		"1234",		// hastings
+      "sectorrootscount":		2,
+      "transactionfeesadded":		"1234",		// hastings
+
+      "expirationheight":		123456,		// blocks
+      "negotiationheight":		123456,		// blocks
+      "proofdeadline":			123456,		// blocks
+
+      "obligationstatus":		"obligationFailed",
+      "originconfirmed":		true,
+      "proofconfirmed":			true,
+      "proofconstructed":		true
+      "revisionconfirmed":		false,
+      "revisionconstructed":		false,
+    }
+  ]
+}
+```
+
 #### /host/storage [GET]
 
 gets a list of folders tracked by the host's storage manager.
 
-###### JSON Response [(with comments)](/doc/api/Host.md#json-response-1)
+###### JSON Response [(with comments)](/doc/api/Host.md#json-response-2)
 ```javascript
 {
   "folders": [
@@ -487,7 +620,7 @@ standard success or error response. See
 returns the estimated HostDB score of the host using its current settings,
 combined with the provided settings.
 
-###### JSON Response [(with comments)](/doc/api/Host.md#json-response-2)
+###### JSON Response [(with comments)](/doc/api/Host.md#json-response-3)
 ```javascript
 {
 	"estimatedscore": "123456786786786786786786786742133",
@@ -712,19 +845,21 @@ description of the byte encoding.
 Renter
 ------
 
-| Route                                                                   | HTTP verb |
-| ----------------------------------------------------------------------- | --------- |
-| [/renter](#renter-get)                                                  | GET       |
-| [/renter](#renter-post)                                                 | POST      |
-| [/renter/contracts](#rentercontracts-get)                               | GET       |
-| [/renter/downloads](#renterdownloads-get)                               | GET       |
-| [/renter/prices](#renterprices-get)                                     | GET       |
-| [/renter/files](#renterfiles-get)                                       | GET       |
-| [/renter/delete/*___siapath___](#renterdeletesiapath-post)              | POST      |
-| [/renter/download/*___siapath___](#renterdownloadsiapath-get)           | GET       |
-| [/renter/downloadasync/*___siapath___](#renterdownloadasyncsiapath-get) | GET       |
-| [/renter/rename/*___siapath___](#renterrenamesiapath-post)              | POST      |
-| [/renter/upload/*___siapath___](#renteruploadsiapath-post)              | POST      |
+| Route                                                                     | HTTP verb |
+| --------------------------------------------------------------------------| --------- |
+| [/renter](#renter-get)                                                    | GET       |
+| [/renter](#renter-post)                                                   | POST      |
+| [/renter/contracts](#rentercontracts-get)                                 | GET       |
+| [/renter/downloads](#renterdownloads-get)                                 | GET       |
+| [/renter/prices](#renterprices-get)                                       | GET       |
+| [/renter/files](#renterfiles-get)                                         | GET       |
+| [/renter/file/*___siapath___](#renterfile___siapath___-get)               | GET       |
+| [/renter/delete/*___siapath___](#renterdeletesiapath-post)                | POST      |
+| [/renter/download/*___siapath___](#renterdownloadsiapath-get)             | GET       |
+| [/renter/downloadasync/*___siapath___](#renterdownloadasyncsiapath-get)   | GET       |
+| [/renter/rename/*___siapath___](#renterrenamesiapath-post)                | POST      |
+| [/renter/stream/*___siapath___](#renterstreamsiapath-get)                 | GET       |
+| [/renter/upload/*___siapath___](#renteruploadsiapath-post)                | POST      |
 
 For examples and detailed descriptions of request and response parameters,
 refer to [Renter.md](/doc/api/Renter.md).
@@ -745,9 +880,11 @@ returns the current settings along with metrics on the renter's spending.
     }
   },
   "financialmetrics": {
-    "contractspending": "1234", // hastings
+    "contractfees":     "1234", // hastings
+    "contractspending": "1234", // hastings (deprecated, now totalallocated)
     "downloadspending": "5678", // hastings
     "storagespending":  "1234", // hastings
+    "totalallocated":   "1234", // hastings
     "uploadspending":   "5678", // hastings
     "unspent":          "1234"  // hastings
   },
@@ -780,49 +917,25 @@ returns active contracts. Expired contracts are not included.
 {
   "contracts": [
     {
-      // Amount of contract funds that have been spent on downloads.
       "downloadspending": "1234", // hastings
-
-      // Block height that the file contract ends on.
       "endheight": 50000, // block height
-
-      // Fees paid in order to form the file contract.
       "fees": "1234", // hastings
-
-      // Public key of the host the contract was formed with.
       "hostpublickey": {
         "algorithm": "ed25519",
         "key": "RW50cm9weSBpc24ndCB3aGF0IGl0IHVzZWQgdG8gYmU="
       },
-
-      // ID of the file contract.
       "id": "1234567890abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-
-      // A signed transaction containing the most recent contract revision.
       "lasttransaction": {},
-
-      // Address of the host the file contract was formed with.
       "netaddress": "12.34.56.78:9",
-
-      // Remaining funds left for the renter to spend on uploads & downloads.
       "renterfunds": "1234", // hastings
-
-      // Size of the file contract, which is typically equal to the number of
-      // bytes that have been uploaded to the host.
       "size": 8192, // bytes
-
-      // Block height that the file contract began on.
       "startheight": 50000, // block height
-
-      // Amount of contract funds that have been spent on storage.
+      "StorageSpending": "1234",
       "storagespending": "1234", // hastings
-
-      // Total cost to the wallet of forming the file contract.
-      // This includes both the fees and the funds allocated in the contract.
       "totalcost": "1234", // hastings
-
-      // Amount of contract funds that have been spent on uploads.
       "uploadspending": "1234" // hastings
+      "goodforupload": true,
+      "goodforrenew": false,
     }
   ]
 }
@@ -837,12 +950,18 @@ lists all files in the download queue.
 {
   "downloads": [
     {
-      "siapath":     "foo/bar.txt",
-      "destination": "/home/users/alice/bar.txt",
-      "filesize":    8192,                  // bytes
-      "received":    4096,                  // bytes
-      "starttime":   "2009-11-10T23:00:00Z", // RFC 3339 time
-      "error": ""
+      "destination":     "/home/users/alice/bar.txt",
+      "destinationtype": "file",
+      "length":          8192,
+      "offset":          2000,
+      "siapath":         "foo/bar.txt",
+
+      "completed":           true,
+      "endtime":             "2009-11-10T23:10:00Z", // RFC 3339 time
+      "error":               "",
+      "received":            8192,
+      "starttime":           "2009-11-10T23:00:00Z", // RFC 3339 time
+      "totaldatatransfered": 10031
     }
   ]
 }
@@ -871,11 +990,32 @@ lists the status of all files.
 }
 ```
 
+#### /renter/file/*__siapath__ [GET]
+
+lists the status of specified file.
+
+###### JSON Response [(with comments)](/doc/api/Renter.md#json-response-4)
+```javascript
+{
+  "file": {
+    "siapath":        "foo/bar.txt",
+    "localpath":      "/home/foo/bar.txt",
+    "filesize":       8192, // bytes
+    "available":      true,
+    "renewing":       true,
+    "redundancy":     5,
+    "bytesuploaded":  209715200, // total bytes uploaded
+    "uploadprogress": 100, // percent
+    "expiration":     60000
+  }
+}
+```
+
 #### /renter/prices [GET]
 
 lists the estimated prices of performing various storage and data operations.
 
-###### JSON Response [(with comments)](/doc/api/Renter.md#json-response-4)
+###### JSON Response [(with comments)](/doc/api/Renter.md#json-response-5)
 ```javascript
 {
   "downloadterabyte":      "1234", // hastings
@@ -912,7 +1052,11 @@ has been downloaded.
 
 ###### Query String Parameters [(with comments)](/doc/api/Renter.md#query-string-parameters-1)
 ```
+async
 destination
+httpresp
+length
+offset
 ```
 
 ###### Response
@@ -957,6 +1101,26 @@ newsiapath
 standard success or error response. See
 [#standard-responses](#standard-responses).
 
+#### /renter/stream/*___siapath___ [GET]
+
+downloads a file using http streaming. This call blocks until the data is
+received.
+The streaming endpoint also uses caching internally to prevent siad from
+redownloading the same chunk multiple times when only parts of a file are
+requested at once. This might lead to a substantial increase in ram usage and
+therefore it is not recommended to stream multiple files in parallel at the
+moment. This restriction will be removed together with the caching once partial
+downloads are supported in the future.
+
+###### Path Parameters [(with comments)](/doc/api/Renter.md#path-parameters-1)
+```
+*siapath
+```
+
+###### Response
+standard success with the requested data in the body or error response. See
+[#standard-responses](#standard-responses).
+
 #### /renter/upload/*___siapath___ [POST]
 
 uploads a file to the network from the local filesystem.
@@ -981,11 +1145,25 @@ standard success or error response. See
 Transaction Pool
 ------
 
-| Route                           | HTTP verb |
-| ------------------------------- | --------- |
-| [/tpool/fee](#tpoolfee-get)     | GET       |
-| [/tpool/raw/:id](#tpoolraw-get) | GET       |
-| [/tpool/raw](#tpoolraw-post)    | POST      |
+| Route                                       | HTTP verb |
+| ------------------------------------------- | --------- |
+| [/tpool/confirmed/:id](#tpoolconfirmed-get) | GET       |
+| [/tpool/fee](#tpoolfee-get)                 | GET       |
+| [/tpool/raw/:id](#tpoolraw-get)             | GET       |
+| [/tpool/raw](#tpoolraw-post)                | POST      |
+
+#### /tpool/confirmed/:id [GET]
+
+returns whether the requested transaction has been seen on the blockchain.
+Note, however, that the block containing the transaction may later be
+invalidated by a reorg.
+
+###### JSON Response
+```javascript
+{
+  "confirmed": true
+}
+```
 
 #### /tpool/fee [GET]
 
