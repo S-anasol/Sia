@@ -82,10 +82,32 @@ func (api *API) hostdbAllHandler(w http.ResponseWriter, req *http.Request, _ htt
 	hosts := api.renter.AllHosts()
 	var extendedHosts []ExtendedHostDBEntry
 	for _, host := range hosts {
+
+		var isActive bool
+		var scoreBreakdown modules.HostScoreBreakdown
+
+		isActive = true
+
+		if len(host.ScanHistory) == 0 {
+			isActive = false
+		}
+		if !host.ScanHistory[len(host.ScanHistory)-1].Success {
+			isActive = false
+		}
+		if !host.AcceptingContracts {
+			isActive = false
+		}
+
+		if isActive {
+			scoreBreakdown = api.renter.ScoreBreakdown(host)
+		} else {
+			scoreBreakdown = modules.HostScoreBreakdown{}
+		}
+
 		extendedHosts = append(extendedHosts, ExtendedHostDBEntry{
 			HostDBEntry:     host,
 			PublicKeyString: host.PublicKey.String(),
-			ScoreBreakdown:  api.renter.ScoreBreakdown(host),
+			ScoreBreakdown:  scoreBreakdown,
 		})
 	}
 
