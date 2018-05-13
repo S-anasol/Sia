@@ -172,7 +172,7 @@ func (api *API) consensusValidateTransactionsetHandler(w http.ResponseWriter, re
 }
 
 // consensusBlocksHandler handles API calls to /consensus/blocks/:height.
-func (api *API) consensusBlocksHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+func (api *API) consensusBlocksbyHeightHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
 	// Parse the height that's being requested.
 	var height types.BlockHeight
 	_, err := fmt.Sscan(ps.ByName("height"), &height)

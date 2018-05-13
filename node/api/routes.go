@@ -23,7 +23,7 @@ func (api *API) buildHTTPRoutes(requiredUserAgent string, requiredPassword strin
 		router.GET("/consensus", api.consensusHandler)
 		router.GET("/consensus/blocks", api.consensusBlocksHandler)
 		router.POST("/consensus/validate/transactionset", api.consensusValidateTransactionsetHandler)
-		router.GET("/consensus/blocks/:height", api.consensusBlocksHandler)
+		router.GET("/consensus/blocks/:height", api.consensusBlocksbyHeightHandler)
 	}
 
 	// Explorer API Calls
