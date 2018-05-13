@@ -8,7 +8,7 @@ import (
 	"github.com/NebulousLabs/Sia/types"
 
 	"github.com/julienschmidt/httprouter"
-	"crypto"
+	"github.com/NebulousLabs/Sia/crypto"
 )
 
 // ConsensusGET contains general information about the consensus set, with tags
