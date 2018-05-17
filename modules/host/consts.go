@@ -34,100 +34,6 @@ const (
 )
 
 var (
-	// defaultCollateral defines the amount of money that the host puts up as
-	// collateral per-byte by default. The collateral should be considered as
-	// an absolute instead of as a percentage, because low prices result in
-	// collaterals which may be significant by percentage, but insignificant
-	// overall. A default of 25 KS / TB / Month has been chosen, which is 2.5x
-	// the default price for storage. The host is expected to put up a
-	// significant amount of collateral as a commitment to faithfulness,
-	// because this guarantees that the incentives are aligned for the host to
-	// keep the data even if the price of siacoin fluctuates, the price of raw
-	// storage fluctuates, or the host realizes that there is unexpected
-	// opportunity cost in being a host.
-	defaultCollateral = types.SiacoinPrecision.Mul64(100).Div(modules.BlockBytesPerMonthTerabyte) // 100 SC / TB / Month
-
-	// defaultCollateralBudget defines the maximum number of siacoins that the
-	// host is going to allocate towards collateral. The number has been chosen
-	// as a number that is large, but not so large that someone would be
-	// furious for losing access to it for a few weeks.
-	defaultCollateralBudget = types.SiacoinPrecision.Mul64(100e3)
-
-	// defaultContractPrice defines the default price of creating a contract
-	// with the host. The default is set to 30 siacoins, which the file
-	// contract revision can have 15 siacoins put towards it, and the storage
-	// proof can have 15 siacoins put towards it.
-	defaultContractPrice = types.SiacoinPrecision.Mul64(3) // 3 siacoins
-
-	// defaultDownloadBandwidthPrice defines the default price of upload
-	// bandwidth. The default is set to 10 siacoins per gigabyte, because
-	// download bandwidth is expected to be plentiful but also in-demand.
-	defaultDownloadBandwidthPrice = types.SiacoinPrecision.Mul64(25).Div(modules.BytesPerTerabyte) // 25 SC / TB
-
-	// defaultMaxDownloadBatchSize defines the maximum number of bytes that the
-	// host will allow to be requested by a single download request. 17 MiB has
-	// been chosen because it's 4 full sectors plus some wiggle room. 17 MiB is
-	// a conservative default, most hosts will be fine with a number like 65
-	// MiB.
-	defaultMaxDownloadBatchSize = 17 * (1 << 20)
-
-	// defaultMaxReviseBatchSize defines the maximum number of bytes that the
-	// host will allow to be sent during a single batch update in a revision
-	// RPC. 17 MiB has been chosen because it's four full sectors, plus some
-	// wiggle room for the extra data or a few delete operations. The whole
-	// batch will be held in memory, so the batch size should only be increased
-	// substantially if the host has a lot of memory. Additionally, the whole
-	// batch is sent in one network connection. Additionally, the renter can
-	// steal funds for upload bandwidth all the way out to the size of a batch.
-	// 17 MiB is a conservative default, most hosts are likely to be just fine
-	// with a number like 65 MiB.
-	defaultMaxReviseBatchSize = 17 * (1 << 20)
-
-	// defaultMaxCollateral defines the maximum amount of collateral that the
-	// host is comfortable putting into a single file contract. 10e3 is a
-	// relatively small file contract, but millions of siacoins could be locked
-	// away by only a few hundred file contracts. As the ecosystem matures, it
-	// is expected that the safe default for this value will increase quite a
-	// bit.
-	defaultMaxCollateral = types.SiacoinPrecision.Mul64(5e3)
-
-	// defaultStoragePrice defines the starting price for hosts selling
-	// storage. We try to match a number that is both reasonably profitable and
-	// reasonably competitive.
-	defaultStoragePrice = types.SiacoinPrecision.Mul64(50).Div(modules.BlockBytesPerMonthTerabyte) // 50 SC / TB / Month
-
-	// defaultUploadBandwidthPrice defines the default price of upload
-	// bandwidth. The default is set to 1 siacoin per GB, because the host is
-	// presumed to have a large amount of downstream bandwidth. Furthermore,
-	// the host is typically only downloading data if it is planning to store
-	// the data, meaning that the host serves to profit from accepting the
-	// data.
-	defaultUploadBandwidthPrice = types.SiacoinPrecision.Mul64(1).Div(modules.BytesPerTerabyte) // 1 SC / TB
-
-	// workingStatusFirstCheck defines how frequently the Host's working status
-	// check runs
-	workingStatusFirstCheck = build.Select(build.Var{
-		Standard: time.Minute * 3,
-		Dev:      time.Minute * 1,
-		Testing:  time.Second * 3,
-	}).(time.Duration)
-
-	// workingStatusFrequency defines how frequently the Host's working status
-	// check runs
-	workingStatusFrequency = build.Select(build.Var{
-		Standard: time.Minute * 10,
-		Dev:      time.Minute * 5,
-		Testing:  time.Second * 10,
-	}).(time.Duration)
-
-	// workingStatusThreshold defines how many settings calls must occur over the
-	// workingStatusFrequency for the host to be considered working.
-	workingStatusThreshold = build.Select(build.Var{
-		Standard: uint64(3),
-		Dev:      uint64(1),
-		Testing:  uint64(1),
-	}).(uint64)
-
 	// connectablityCheckFirstWait defines how often the host's connectability
 	// check is run.
 	connectabilityCheckFirstWait = build.Select(build.Var{
@@ -151,6 +57,75 @@ var (
 		Dev:      time.Minute * 5,
 		Testing:  time.Second * 90,
 	}).(time.Duration)
+
+	// defaultCollateral defines the amount of money that the host puts up as
+	// collateral per-byte by default. The collateral should be considered as
+	// an absolute instead of as a percentage, because low prices result in
+	// collaterals which may be significant by percentage, but insignificant
+	// overall. A default of 25 KS / TB / Month has been chosen, which is 2.5x
+	// the default price for storage. The host is expected to put up a
+	// significant amount of collateral as a commitment to faithfulness,
+	// because this guarantees that the incentives are aligned for the host to
+	// keep the data even if the price of siacoin fluctuates, the price of raw
+	// storage fluctuates, or the host realizes that there is unexpected
+	// opportunity cost in being a host.
+	defaultCollateral = types.SiacoinPrecision.Mul64(100).Div(modules.BlockBytesPerMonthTerabyte) // 100 SC / TB / Month
+
+	// defaultCollateralBudget defines the maximum number of siacoins that the
+	// host is going to allocate towards collateral. The number has been chosen
+	// as a number that is large, but not so large that someone would be
+	// furious for losing access to it for a few weeks.
+	defaultCollateralBudget = types.SiacoinPrecision.Mul64(100e3)
+
+	// defaultContractPrice defines the default price of creating a contract
+	// with the host. The current default is 0.1. This was chosen since it is
+	// the minimum fee estimation of the transactionpool for 10e3 bytes.
+	defaultContractPrice = types.SiacoinPrecision.Div64(10) // 0.1 siacoins
+
+	// defaultDownloadBandwidthPrice defines the default price of upload
+	// bandwidth. The default is set to 10 siacoins per gigabyte, because
+	// download bandwidth is expected to be plentiful but also in-demand.
+	defaultDownloadBandwidthPrice = types.SiacoinPrecision.Mul64(25).Div(modules.BytesPerTerabyte) // 25 SC / TB
+
+	// defaultMaxCollateral defines the maximum amount of collateral that the
+	// host is comfortable putting into a single file contract. 10e3 is a
+	// relatively small file contract, but millions of siacoins could be locked
+	// away by only a few hundred file contracts. As the ecosystem matures, it
+	// is expected that the safe default for this value will increase quite a
+	// bit.
+	defaultMaxCollateral = types.SiacoinPrecision.Mul64(5e3)
+
+	// defaultMaxDownloadBatchSize defines the maximum number of bytes that the
+	// host will allow to be requested by a single download request. 17 MiB has
+	// been chosen because it's 4 full sectors plus some wiggle room. 17 MiB is
+	// a conservative default, most hosts will be fine with a number like 65
+	// MiB.
+	defaultMaxDownloadBatchSize = 17 * (1 << 20)
+
+	// defaultMaxReviseBatchSize defines the maximum number of bytes that the
+	// host will allow to be sent during a single batch update in a revision
+	// RPC. 17 MiB has been chosen because it's four full sectors, plus some
+	// wiggle room for the extra data or a few delete operations. The whole
+	// batch will be held in memory, so the batch size should only be increased
+	// substantially if the host has a lot of memory. Additionally, the whole
+	// batch is sent in one network connection. Additionally, the renter can
+	// steal funds for upload bandwidth all the way out to the size of a batch.
+	// 17 MiB is a conservative default, most hosts are likely to be just fine
+	// with a number like 65 MiB.
+	defaultMaxReviseBatchSize = 17 * (1 << 20)
+
+	// defaultStoragePrice defines the starting price for hosts selling
+	// storage. We try to match a number that is both reasonably profitable and
+	// reasonably competitive.
+	defaultStoragePrice = types.SiacoinPrecision.Mul64(50).Div(modules.BlockBytesPerMonthTerabyte) // 50 SC / TB / Month
+
+	// defaultUploadBandwidthPrice defines the default price of upload
+	// bandwidth. The default is set to 1 siacoin per GB, because the host is
+	// presumed to have a large amount of downstream bandwidth. Furthermore,
+	// the host is typically only downloading data if it is planning to store
+	// the data, meaning that the host serves to profit from accepting the
+	// data.
+	defaultUploadBandwidthPrice = types.SiacoinPrecision.Mul64(1).Div(modules.BytesPerTerabyte) // 1 SC / TB
 
 	// defaultWindowSize is the size of the proof of storage window requested
 	// by the host. The host will not delete any obligations until the window
@@ -220,6 +195,30 @@ var (
 		Standard: time.Millisecond * 50,
 		Testing:  time.Millisecond,
 	}).(time.Duration)
+
+	// workingStatusFirstCheck defines how frequently the Host's working status
+	// check runs
+	workingStatusFirstCheck = build.Select(build.Var{
+		Standard: time.Minute * 3,
+		Dev:      time.Minute * 1,
+		Testing:  time.Second * 3,
+	}).(time.Duration)
+
+	// workingStatusFrequency defines how frequently the Host's working status
+	// check runs
+	workingStatusFrequency = build.Select(build.Var{
+		Standard: time.Minute * 10,
+		Dev:      time.Minute * 5,
+		Testing:  time.Second * 10,
+	}).(time.Duration)
+
+	// workingStatusThreshold defines how many settings calls must occur over the
+	// workingStatusFrequency for the host to be considered working.
+	workingStatusThreshold = build.Select(build.Var{
+		Standard: uint64(3),
+		Dev:      uint64(1),
+		Testing:  uint64(1),
+	}).(uint64)
 )
 
 // All of the following variables define the names of buckets used by the host

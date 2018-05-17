@@ -12,13 +12,15 @@ import (
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 var (
 	prefixDSCO = []byte("dsco_")
 	prefixFCEX = []byte("fcex_")
+)
 
+var (
 	// BlockHeight is a bucket that stores the current block height.
 	//
 	// Generally we would just look at BlockPath.Stats(), but there is an error
@@ -52,13 +54,13 @@ var (
 	// inconsistencies within the database have been detected.
 	Consistency = []byte("Consistency")
 
-	// SiacoinOutputs is a database bucket that contains all of the unspent
-	// siacoin outputs.
-	SiacoinOutputs = []byte("SiacoinOutputs")
-
 	// FileContracts is a database bucket that contains all of the open file
 	// contracts.
 	FileContracts = []byte("FileContracts")
+
+	// SiacoinOutputs is a database bucket that contains all of the unspent
+	// siacoin outputs.
+	SiacoinOutputs = []byte("SiacoinOutputs")
 
 	// SiafundOutputs is a database bucket that contains all of the unspent
 	// siafund outputs.
@@ -153,6 +155,19 @@ func currentBlockID(tx *bolt.Tx) types.BlockID {
 	id, err := getPath(tx, blockHeight(tx))
 	if build.DEBUG && err != nil {
 		panic(err)
+	}
+	return id
+}
+
+// dbCurrentBlockID is a convenience function allowing currentBlockID to be
+// called without a bolt.Tx.
+func (cs *ConsensusSet) dbCurrentBlockID() (id types.BlockID) {
+	dbErr := cs.db.View(func(tx *bolt.Tx) error {
+		id = currentBlockID(tx)
+		return nil
+	})
+	if dbErr != nil {
+		panic(dbErr)
 	}
 	return id
 }

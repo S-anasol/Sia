@@ -4,13 +4,16 @@ package types
 // contracts.
 
 import (
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
 )
 
 var (
-	ProofValid  ProofStatus = true
+	// ProofMissed indicates that a StorageProof was missed, which means that
+	// no valid proof was submitted within the proof window.
 	ProofMissed ProofStatus = false
+	// ProofValid indicates that a valid StorageProof was submitted within the
+	// proof window.
+	ProofValid ProofStatus = true
 )
 
 type (
@@ -23,10 +26,10 @@ type (
 	// 'WindowStart' and 'WindowEnd'. Upon submitting the proof, the outputs
 	// for 'ValidProofOutputs' are created. If the party does not submit a
 	// storage proof by 'WindowEnd', then the outputs for 'MissedProofOutputs'
-	// are created instead. The sum of 'MissedProofOutputs' must equal
-	// 'Payout', and the sum of 'ValidProofOutputs' must equal 'Payout' plus
-	// the siafund fee.  This fee is sent to the siafund pool, which is a set
-	// of siacoins only spendable by siafund owners.
+	// are created instead. The sum of 'MissedProofOutputs' and the sum of
+	// 'ValidProofOutputs' must equal 'Payout' minus the siafund fee. This fee
+	// is sent to the siafund pool, which is a set of siacoins only spendable
+	// by siafund owners.
 	//
 	// Under normal circumstances, the payout will be funded by both the host and
 	// the renter, which gives the host incentive not to lose the file. The
@@ -90,6 +93,7 @@ type (
 		HashSet  []crypto.Hash            `json:"hashset"`
 	}
 
+	// ProofStatus indicates whether a StorageProof was valid (true) or missed (false).
 	ProofStatus bool
 )
 
@@ -118,7 +122,7 @@ func PostTax(height BlockHeight, payout Currency) Currency {
 func Tax(height BlockHeight, payout Currency) Currency {
 	// COMPATv0.4.0 - until the first 20,000 blocks have been archived, they
 	// will need to be handled in a special way.
-	if (height < 21e3 && build.Release == "standard") || (height < 10 && build.Release == "testing") {
+	if height < TaxHardforkHeight {
 		return payout.MulFloat(0.039).RoundDown(SiafundCount)
 	}
 	return payout.MulTax().RoundDown(SiafundCount)

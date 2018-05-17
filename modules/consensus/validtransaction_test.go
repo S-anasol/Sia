@@ -3,11 +3,12 @@ package consensus
 import (
 	"testing"
 
+	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/types"
 	"github.com/NebulousLabs/fastrand"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 // TestTryValidTransactionSet submits a valid transaction set to the
@@ -82,7 +83,7 @@ func TestTryInvalidTransactionSet(t *testing.T) {
 // for them, probing segment boundaries (first segment, last segment,
 // incomplete segment, etc.).
 func TestStorageProofBoundaries(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || !build.VLONG {
 		t.SkipNow()
 	}
 	t.Parallel()
@@ -125,7 +126,10 @@ func TestStorageProofBoundaries(t *testing.T) {
 
 			// Create a transaction around the file contract and add it to the
 			// transaction pool.
-			b := cst.wallet.StartTransaction()
+			b, err := cst.wallet.StartTransaction()
+			if err != nil {
+				t.Fatal(err)
+			}
 			err = b.FundSiacoins(types.NewCurrency64(500))
 			if err != nil {
 				t.Fatal(err)
@@ -211,7 +215,7 @@ func TestStorageProofBoundaries(t *testing.T) {
 // them, probing segment boundaries (first segment, last segment, incomplete
 // segment, etc.).
 func TestEmptyStorageProof(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || !build.VLONG {
 		t.SkipNow()
 	}
 	t.Parallel()
@@ -254,7 +258,10 @@ func TestEmptyStorageProof(t *testing.T) {
 
 			// Create a transaction around the file contract and add it to the
 			// transaction pool.
-			b := cst.wallet.StartTransaction()
+			b, err := cst.wallet.StartTransaction()
+			if err != nil {
+				t.Fatal(err)
+			}
 			err = b.FundSiacoins(types.NewCurrency64(500))
 			if err != nil {
 				t.Fatal(err)

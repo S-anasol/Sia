@@ -51,10 +51,17 @@ func (h *Host) managedAddRenewCollateral(so storageObligation, settings modules.
 	parents := txnSet[:len(txnSet)-1]
 	fc := txn.FileContracts[0]
 	hostPortion := renewContractCollateral(so, settings, fc)
-	builder = h.wallet.RegisterTransaction(txn, parents)
+	builder, err = h.wallet.RegisterTransaction(txn, parents)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if err != nil {
+			builder.Drop()
+		}
+	}()
 	err = builder.FundSiacoins(hostPortion)
 	if err != nil {
-		builder.Drop()
 		return nil, nil, nil, nil, extendErr("could not add collateral: ", ErrorInternal(err.Error()))
 	}
 
@@ -79,7 +86,7 @@ func (h *Host) managedRPCRenewContract(conn net.Conn) error {
 	// revised.
 	_, so, err := h.managedRPCRecentRevision(conn)
 	if err != nil {
-		return extendErr("RPCRecentRevision failed: ", err)
+		return extendErr("failed RPCRecentRevision during RPCRenewContract: ", err)
 	}
 	// The storage obligation is received with a lock. Defer a call to unlock
 	// the storage obligation.
@@ -118,9 +125,9 @@ func (h *Host) managedRPCRenewContract(conn net.Conn) error {
 		return extendErr("unable to read renter public key: ", ErrorConnection(err.Error()))
 	}
 
-	h.mu.RLock()
+	h.mu.Lock()
 	settings := h.externalSettings()
-	h.mu.RUnlock()
+	h.mu.Unlock()
 
 	// Verify that the transaction coming over the wire is a proper renewal.
 	err = h.managedVerifyRenewedContract(so, txnSet, renterPK)
@@ -186,7 +193,7 @@ func (h *Host) managedRPCRenewContract(conn net.Conn) error {
 	renewRevenue := renewBasePrice(so, settings, fc)
 	renewRisk := renewBaseCollateral(so, settings, fc)
 	h.mu.RUnlock()
-	hostTxnSignatures, hostRevisionSignature, newSOID, err := h.managedFinalizeContract(txnBuilder, renterPK, renterTxnSignatures, renterRevisionSignature, so.SectorRoots, renewCollateral, renewRevenue, renewRisk)
+	hostTxnSignatures, hostRevisionSignature, newSOID, err := h.managedFinalizeContract(txnBuilder, renterPK, renterTxnSignatures, renterRevisionSignature, so.SectorRoots, renewCollateral, renewRevenue, renewRisk, settings)
 	if err != nil {
 		modules.WriteNegotiationRejection(conn, err) // Error is ignored to preserve type for extendErr
 		return extendErr("failed to finalize contract: ", err)
@@ -221,14 +228,14 @@ func (h *Host) managedVerifyRenewedContract(so storageObligation, txnSet []types
 		return extendErr("transaction without file contract: ", errEmptyObject)
 	}
 
-	h.mu.RLock()
+	h.mu.Lock()
 	blockHeight := h.blockHeight
 	externalSettings := h.externalSettings()
 	internalSettings := h.settings
 	lockedStorageCollateral := h.financialMetrics.LockedStorageCollateral
 	publicKey := h.publicKey
 	unlockHash := h.unlockHash
-	h.mu.RUnlock()
+	h.mu.Unlock()
 	fc := txnSet[len(txnSet)-1].FileContracts[0]
 
 	// The file size and merkle root must match the file size and merkle root

@@ -1,29 +1,43 @@
+// Package renter is responsible for uploading and downloading files on the sia
+// network.
 package renter
 
-// TODO: Change the upload loop to have an upload state, and make it so that
-// instead of occasionally rebuilding the whole file matrix it has just a
-// single matrix that it's constantly pulling chunks from. Have a separate loop
-// which goes through the files and adds them to the matrix. Have the loop
-// listen on the channel for new files, so that they can go directly into the
-// matrix.
+// NOTE: Some of the concurrency patterns in the renter are fairly complex. A
+// lot of this has been cleaned up, though some shadows of previous demons still
+// remain. Be careful when working with anything that involves concurrency.
+
+// TODO: Allow the 'baseMemory' to be set by the user.
+
+// TODO: The repair loop currently receives new upload jobs through a channel.
+// The download loop has a better model, a heap that can be pushed to and popped
+// from concurrently without needing complex channel communication. Migrating
+// the renter to this model should clean up some of the places where uploading
+// bottlenecks, and reduce the amount of channel-ninjitsu required to make the
+// uploading function.
 
 import (
 	"errors"
+	"reflect"
+	"strings"
+	"sync"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/modules/renter/contractor"
 	"github.com/NebulousLabs/Sia/modules/renter/hostdb"
 	"github.com/NebulousLabs/Sia/persist"
-	"github.com/NebulousLabs/Sia/sync"
+	siasync "github.com/NebulousLabs/Sia/sync"
 	"github.com/NebulousLabs/Sia/types"
+
+	"github.com/NebulousLabs/threadgroup"
 )
 
 var (
 	errNilContractor = errors.New("cannot create renter with nil contractor")
 	errNilCS         = errors.New("cannot create renter with nil consensus set")
-	errNilTpool      = errors.New("cannot create renter with nil transaction pool")
+	errNilGateway    = errors.New("cannot create hostdb with nil gateway")
 	errNilHdb        = errors.New("cannot create renter with nil hostdb")
+	errNilTpool      = errors.New("cannot create renter with nil transaction pool")
 )
 
 var (
@@ -61,7 +75,7 @@ type hostDB interface {
 	// RandomHosts returns a set of random hosts, weighted by their estimated
 	// usefulness / attractiveness to the renter. RandomHosts will not return
 	// any offline or inactive hosts.
-	RandomHosts(int, []types.SiaPublicKey) []modules.HostDBEntry
+	RandomHosts(int, []types.SiaPublicKey) ([]modules.HostDBEntry, error)
 
 	// ScoreBreakdown returns a detailed explanation of the various properties
 	// of the host.
@@ -87,15 +101,23 @@ type hostContractor interface {
 	// Close closes the hostContractor.
 	Close() error
 
-	// Contract returns the latest contract formed with the specified host.
-	Contract(modules.NetAddress) (modules.RenterContract, bool)
-
 	// Contracts returns the contracts formed by the contractor.
 	Contracts() []modules.RenterContract
+
+	// ContractByID returns the contract associated with the file contract id.
+	ContractByID(types.FileContractID) (modules.RenterContract, bool)
+
+	// ContractUtility returns the utility field for a given contract, along
+	// with a bool indicating if it exists.
+	ContractUtility(types.FileContractID) (modules.ContractUtility, bool)
 
 	// CurrentPeriod returns the height at which the current allowance period
 	// began.
 	CurrentPeriod() types.BlockHeight
+
+	// PeriodSpending returns the amount spent on contracts during the current
+	// billing period.
+	PeriodSpending() modules.ContractorSpending
 
 	// Editor creates an Editor from the specified contract ID, allowing the
 	// insertion, deletion, and modification of sectors.
@@ -110,6 +132,14 @@ type hostContractor interface {
 
 	// ResolveID returns the most recent renewal of the specified ID.
 	ResolveID(types.FileContractID) types.FileContractID
+
+	// RateLimits Gets the bandwidth limits for connections created by the
+	// contractor and its submodules.
+	RateLimits() (readBPS int64, writeBPS int64, packetSize uint64)
+
+	// SetRateLimits sets the bandwidth limits for connections created by the
+	// contractor and its submodules.
+	SetRateLimits(int64, int64, uint64)
 }
 
 // A trackedFile contains metadata about files being tracked by the Renter.
@@ -123,105 +153,58 @@ type trackedFile struct {
 
 // A Renter is responsible for tracking all of the files that a user has
 // uploaded to Sia, as well as the locations and health of these files.
+//
+// TODO: Separate the workerPool to have its own mutex. The workerPool doesn't
+// interfere with any of the other fields in the renter, should be fine for it
+// to have a separate mutex, that way operations on the worker pool don't block
+// operations on other parts of the struct. If we're going to do it that way,
+// might make sense to split the worker pool off into it's own struct entirely
+// the same way that we split of the memoryManager entirely.
 type Renter struct {
 	// File management.
 	//
 	// tracking contains a list of files that the user intends to maintain. By
 	// default, files loaded through sharing are not maintained by the user.
 	files    map[string]*file
-	tracking map[string]trackedFile // map from nickname to metadata
+	tracking map[string]trackedFile // Map from nickname to metadata.
 
-	// Work management.
+	// Download management. The heap has a separate mutex because it is always
+	// accessed in isolation.
+	downloadHeapMu sync.Mutex         // Used to protect the downloadHeap.
+	downloadHeap   *downloadChunkHeap // A heap of priority-sorted chunks to download.
+	newDownloads   chan struct{}      // Used to notify download loop that new downloads are available.
+
+	// Download history. The history list has its own mutex because it is always
+	// accessed in isolation.
 	//
-	// chunkQueue contains a list of incomplete work that the download loop acts
-	// upon. The chunkQueue is only ever modified by the main download loop
-	// thread, which means it can be accessed and updated without locks.
-	//
-	// downloadQueue contains a complete history of work that has been
-	// submitted to the download loop.
-	chunkQueue    []*chunkDownload // Accessed without locks.
-	downloadQueue []*download
-	newDownloads  chan *download
-	newRepairs    chan *file
+	// TODO: Currently the download history doesn't include repair-initiated
+	// downloads, and instead only contains user-initiated downlods.
+	downloadHistory   []*download
+	downloadHistoryMu sync.Mutex
+
+	// Upload management.
+	uploadHeap uploadHeap
+
+	// List of workers that can be used for uploading and/or downloading.
+	memoryManager *memoryManager
 	workerPool    map[types.FileContractID]*worker
 
+	// Cache the last price estimation result.
+	lastEstimation modules.RenterPriceEstimation
+
 	// Utilities.
+	chunkCache     map[string]*cacheData
+	cmu            *sync.Mutex
 	cs             modules.ConsensusSet
+	deps           modules.Dependencies
+	g              modules.Gateway
 	hostContractor hostContractor
 	hostDB         hostDB
 	log            *persist.Logger
 	persistDir     string
-	mu             *sync.RWMutex
-	tg             *sync.ThreadGroup
+	mu             *siasync.RWMutex
+	tg             threadgroup.ThreadGroup
 	tpool          modules.TransactionPool
-}
-
-// New returns an initialized renter.
-func New(g modules.Gateway, cs modules.ConsensusSet, wallet modules.Wallet, tpool modules.TransactionPool, persistDir string) (*Renter, error) {
-	hdb, err := hostdb.New(g, cs, persistDir)
-	if err != nil {
-		return nil, err
-	}
-	hc, err := contractor.New(cs, wallet, tpool, hdb, persistDir)
-	if err != nil {
-		return nil, err
-	}
-
-	return newRenter(cs, tpool, hdb, hc, persistDir)
-}
-
-// newRenter initializes a renter and returns it.
-func newRenter(cs modules.ConsensusSet, tpool modules.TransactionPool, hdb hostDB, hc hostContractor, persistDir string) (*Renter, error) {
-	if cs == nil {
-		return nil, errNilCS
-	}
-	if tpool == nil {
-		return nil, errNilTpool
-	}
-	if hc == nil {
-		return nil, errNilContractor
-	}
-	if hdb == nil {
-		// Nil hdb currently allowed for testing purposes. :(
-		// return nil, errNilHdb
-	}
-
-	r := &Renter{
-		newRepairs: make(chan *file),
-		files:      make(map[string]*file),
-		tracking:   make(map[string]trackedFile),
-
-		newDownloads: make(chan *download),
-		workerPool:   make(map[types.FileContractID]*worker),
-
-		cs:             cs,
-		hostDB:         hdb,
-		hostContractor: hc,
-		persistDir:     persistDir,
-		mu:             sync.New(modules.SafeMutexDelay, 1),
-		tg:             new(sync.ThreadGroup),
-		tpool:          tpool,
-	}
-	if err := r.initPersist(); err != nil {
-		return nil, err
-	}
-
-	// Spin up the workers for the work pool.
-	r.updateWorkerPool()
-	go r.threadedRepairLoop()
-	go r.threadedDownloadLoop()
-	go r.threadedQueueRepairs()
-
-	// Kill workers on shutdown.
-	r.tg.OnStop(func() {
-		id := r.mu.RLock()
-		for _, worker := range r.workerPool {
-			close(worker.killChan)
-		}
-		r.mu.RUnlock(id)
-	})
-
-	return r, nil
 }
 
 // Close closes the Renter and its dependencies
@@ -237,8 +220,18 @@ func (r *Renter) Close() error {
 // TODO: Make this function line up with the actual settings in the renter.
 // Perhaps even make it so it uses the renter's actual contracts if it has any.
 func (r *Renter) PriceEstimation() modules.RenterPriceEstimation {
+	id := r.mu.RLock()
+	lastEstimation := r.lastEstimation
+	r.mu.RUnlock(id)
+	if !reflect.DeepEqual(lastEstimation, modules.RenterPriceEstimation{}) {
+		return lastEstimation
+	}
+
 	// Grab hosts to perform the estimation.
-	hosts := r.hostDB.RandomHosts(priceEstimationScope, nil)
+	hosts, err := r.hostDB.RandomHosts(priceEstimationScope, nil)
+	if err != nil {
+		return modules.RenterPriceEstimation{}
+	}
 
 	// Check if there are zero hosts, which means no estimation can be made.
 	if len(hosts) == 0 {
@@ -280,51 +273,218 @@ func (r *Renter) PriceEstimation() modules.RenterPriceEstimation {
 	_, feePerByte := r.tpool.FeeEstimation()
 	totalContractCost = totalContractCost.Add(feePerByte.Mul64(1000).Mul64(uint64(priceEstimationScope)))
 
-	return modules.RenterPriceEstimation{
+	est := modules.RenterPriceEstimation{
 		FormContracts:        totalContractCost,
 		DownloadTerabyte:     totalDownloadCost,
 		StorageTerabyteMonth: totalStorageCost,
 		UploadTerabyte:       totalUploadCost,
 	}
+
+	id = r.mu.Lock()
+	r.lastEstimation = est
+	r.mu.Unlock(id)
+
+	return est
 }
 
 // SetSettings will update the settings for the renter.
 func (r *Renter) SetSettings(s modules.RenterSettings) error {
+	// Set allowance.
 	err := r.hostContractor.SetAllowance(s.Allowance)
 	if err != nil {
 		return err
 	}
+	// Set ratelimit
+	if s.MaxDownloadSpeed < 0 || s.MaxUploadSpeed < 0 {
+		return errors.New("download/upload rate limit can't be below 0")
+	}
+	if s.MaxDownloadSpeed == 0 && s.MaxUploadSpeed == 0 {
+		r.hostContractor.SetRateLimits(0, 0, 0)
+	} else {
+		// TODO: In the future we might want the user to be able to configure
+		// the packetSize using the API. For now the sane default is 16kib if
+		// the user wants to limit the connection.
+		r.hostContractor.SetRateLimits(s.MaxDownloadSpeed, s.MaxUploadSpeed, 4*4096)
+	}
 
-	id := r.mu.Lock()
-	r.updateWorkerPool()
-	r.mu.Unlock(id)
+	r.managedUpdateWorkerPool()
 	return nil
 }
 
-// hostdb passthroughs
-func (r *Renter) ActiveHosts() []modules.HostDBEntry                      { return r.hostDB.ActiveHosts() }
-func (r *Renter) AllHosts() []modules.HostDBEntry                         { return r.hostDB.AllHosts() }
+// ActiveHosts returns an array of hostDB's active hosts
+func (r *Renter) ActiveHosts() []modules.HostDBEntry { return r.hostDB.ActiveHosts() }
+
+// AllHosts returns an array of all hosts
+func (r *Renter) AllHosts() []modules.HostDBEntry { return r.hostDB.AllHosts() }
+
+// Host returns the host associated with the given public key
 func (r *Renter) Host(spk types.SiaPublicKey) (modules.HostDBEntry, bool) { return r.hostDB.Host(spk) }
+
+// ScoreBreakdown returns the score breakdown
 func (r *Renter) ScoreBreakdown(e modules.HostDBEntry) modules.HostScoreBreakdown {
 	return r.hostDB.ScoreBreakdown(e)
 }
+
+// EstimateHostScore returns the estimated host score
 func (r *Renter) EstimateHostScore(e modules.HostDBEntry) modules.HostScoreBreakdown {
 	return r.hostDB.EstimateHostScore(e)
 }
 
-// contractor passthroughs
+// Contracts returns an array of host contractor's contracts
 func (r *Renter) Contracts() []modules.RenterContract { return r.hostContractor.Contracts() }
-func (r *Renter) CurrentPeriod() types.BlockHeight    { return r.hostContractor.CurrentPeriod() }
+
+// CurrentPeriod returns the host contractor's current period
+func (r *Renter) CurrentPeriod() types.BlockHeight { return r.hostContractor.CurrentPeriod() }
+
+// ContractUtility returns the utility field for a given contract, along
+// with a bool indicating if it exists.
+func (r *Renter) ContractUtility(id types.FileContractID) (modules.ContractUtility, bool) {
+	return r.hostContractor.ContractUtility(id)
+}
+
+// PeriodSpending returns the host contractor's period spending
+func (r *Renter) PeriodSpending() modules.ContractorSpending { return r.hostContractor.PeriodSpending() }
+
+// Settings returns the host contractor's allowance
 func (r *Renter) Settings() modules.RenterSettings {
+	download, upload, _ := r.hostContractor.RateLimits()
 	return modules.RenterSettings{
-		Allowance: r.hostContractor.Allowance(),
+		Allowance:        r.hostContractor.Allowance(),
+		MaxDownloadSpeed: download,
+		MaxUploadSpeed:   upload,
 	}
 }
-func (r *Renter) AllContracts() []modules.RenterContract {
-	return r.hostContractor.(interface {
-		AllContracts() []modules.RenterContract
-	}).AllContracts()
+
+// ProcessConsensusChange returns the process consensus change
+func (r *Renter) ProcessConsensusChange(cc modules.ConsensusChange) {
+	id := r.mu.Lock()
+	r.lastEstimation = modules.RenterPriceEstimation{}
+	r.mu.Unlock(id)
+}
+
+// validateSiapath checks that a Siapath is a legal filename.
+// ../ is disallowed to prevent directory traversal, and paths must not begin
+// with / or be empty.
+func validateSiapath(siapath string) error {
+	if siapath == "" {
+		return ErrEmptyFilename
+	}
+	if siapath == ".." {
+		return errors.New("siapath cannot be '..'")
+	}
+	if siapath == "." {
+		return errors.New("siapath cannot be '.'")
+	}
+	// check prefix
+	if strings.HasPrefix(siapath, "/") {
+		return errors.New("siapath cannot begin with /")
+	}
+	if strings.HasPrefix(siapath, "../") {
+		return errors.New("siapath cannot begin with ../")
+	}
+	if strings.HasPrefix(siapath, "./") {
+		return errors.New("siapath connot begin with ./")
+	}
+	for _, pathElem := range strings.Split(siapath, "/") {
+		if pathElem == "." || pathElem == ".." {
+			return errors.New("siapath cannot contain . or .. elements")
+		}
+	}
+	return nil
 }
 
 // Enforce that Renter satisfies the modules.Renter interface.
 var _ modules.Renter = (*Renter)(nil)
+
+// NewCustomRenter initializes a renter and returns it.
+func NewCustomRenter(g modules.Gateway, cs modules.ConsensusSet, tpool modules.TransactionPool, hdb hostDB, hc hostContractor, persistDir string, deps modules.Dependencies) (*Renter, error) {
+	if g == nil {
+		return nil, errNilGateway
+	}
+	if cs == nil {
+		return nil, errNilCS
+	}
+	if tpool == nil {
+		return nil, errNilTpool
+	}
+	if hc == nil {
+		return nil, errNilContractor
+	}
+	if hdb == nil && build.Release != "testing" {
+		return nil, errNilHdb
+	}
+
+	r := &Renter{
+		files:    make(map[string]*file),
+		tracking: make(map[string]trackedFile),
+
+		// Making newDownloads a buffered channel means that most of the time, a
+		// new download will trigger an unnecessary extra iteration of the
+		// download heap loop, searching for a chunk that's not there. This is
+		// preferable to the alternative, where in rare cases the download heap
+		// will miss work altogether.
+		newDownloads: make(chan struct{}, 1),
+		downloadHeap: new(downloadChunkHeap),
+
+		uploadHeap: uploadHeap{
+			activeChunks: make(map[uploadChunkID]struct{}),
+			newUploads:   make(chan struct{}, 1),
+		},
+
+		workerPool: make(map[types.FileContractID]*worker),
+
+		chunkCache:     make(map[string]*cacheData),
+		cmu:            new(sync.Mutex),
+		cs:             cs,
+		deps:           deps,
+		g:              g,
+		hostDB:         hdb,
+		hostContractor: hc,
+		persistDir:     persistDir,
+		mu:             siasync.New(modules.SafeMutexDelay, 1),
+		tpool:          tpool,
+	}
+	r.memoryManager = newMemoryManager(defaultMemory, r.tg.StopChan())
+
+	// Load all saved data.
+	if err := r.initPersist(); err != nil {
+		return nil, err
+	}
+
+	// Subscribe to the consensus set.
+	err := cs.ConsensusSetSubscribe(r, modules.ConsensusChangeRecent, r.tg.StopChan())
+	if err != nil {
+		return nil, err
+	}
+
+	// Spin up the workers for the work pool.
+	r.managedUpdateWorkerPool()
+	go r.threadedDownloadLoop()
+	go r.threadedUploadLoop()
+
+	// Kill workers on shutdown.
+	r.tg.OnStop(func() error {
+		id := r.mu.RLock()
+		for _, worker := range r.workerPool {
+			close(worker.killChan)
+		}
+		r.mu.RUnlock(id)
+		return nil
+	})
+
+	return r, nil
+}
+
+// New returns an initialized renter.
+func New(g modules.Gateway, cs modules.ConsensusSet, wallet modules.Wallet, tpool modules.TransactionPool, persistDir string) (*Renter, error) {
+	hdb, err := hostdb.New(g, cs, persistDir)
+	if err != nil {
+		return nil, err
+	}
+	hc, err := contractor.New(cs, wallet, tpool, hdb, persistDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewCustomRenter(g, cs, tpool, hdb, hc, persistDir, modules.ProdDependencies)
+}

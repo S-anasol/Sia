@@ -3,7 +3,9 @@ package wallet
 import (
 	"testing"
 
+	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
+	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 	"github.com/NebulousLabs/fastrand"
 )
@@ -39,7 +41,11 @@ func TestScanLargeIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := types.BlockHeight(0); i <= types.MaturityDelay; i++ {
-		wt.miner.AddBlock()
+		_, err = wt.miner.AddBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+
 	}
 
 	// send money to ourselves so that we sweep a real output (instead of just
@@ -52,12 +58,15 @@ func TestScanLargeIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wt.miner.AddBlock()
+	_, err = wt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// create seed scanner and scan the block
 	seed, _, _ := wt.wallet.PrimarySeed()
 	ss := newSeedScanner(seed, wt.wallet.log)
-	err = ss.scan(wt.cs)
+	err = ss.scan(wt.cs, wt.wallet.tg.StopChan())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +86,12 @@ func TestScanLargeIndex(t *testing.T) {
 // TestScanLoop tests that the scan loop will continue to run as long as it
 // finds indices in the upper half of the last set of generated keys.
 func TestScanLoop(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || !build.VLONG {
 		t.SkipNow()
 	}
 
 	// create a wallet
-	wt, err := createWalletTester("TestScanLoop")
+	wt, err := createWalletTester("TestScanLoop", modules.ProdDependencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,12 +117,15 @@ func TestScanLoop(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wt.miner.AddBlock()
+	_, err = wt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// create seed scanner and scan the block
 	seed, _, _ := wt.wallet.PrimarySeed()
 	ss := newSeedScanner(seed, wt.wallet.log)
-	err = ss.scan(wt.cs)
+	err = ss.scan(wt.cs, wt.wallet.tg.StopChan())
 	if err != nil {
 		t.Fatal(err)
 	}

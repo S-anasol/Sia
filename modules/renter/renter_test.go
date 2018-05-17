@@ -2,6 +2,8 @@ package renter
 
 import (
 	"path/filepath"
+	"reflect"
+	"testing"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
@@ -95,66 +97,6 @@ func newRenterTester(name string) (*renterTester, error) {
 	return rt, nil
 }
 
-// newContractorTester creates a renterTester, but with the supplied
-// hostContractor.
-func newContractorTester(name string, hdb hostDB, hc hostContractor) (*renterTester, error) {
-	// Create the modules.
-	testdir := build.TempDir("renter", name)
-	g, err := gateway.New("localhost:0", false, filepath.Join(testdir, modules.GatewayDir))
-	if err != nil {
-		return nil, err
-	}
-	cs, err := consensus.New(g, false, filepath.Join(testdir, modules.ConsensusDir))
-	if err != nil {
-		return nil, err
-	}
-	tp, err := transactionpool.New(cs, g, filepath.Join(testdir, modules.TransactionPoolDir))
-	if err != nil {
-		return nil, err
-	}
-	w, err := wallet.New(cs, tp, filepath.Join(testdir, modules.WalletDir))
-	if err != nil {
-		return nil, err
-	}
-	key := crypto.GenerateTwofishKey()
-	_, err = w.Encrypt(key)
-	if err != nil {
-		return nil, err
-	}
-	err = w.Unlock(key)
-	if err != nil {
-		return nil, err
-	}
-	r, err := newRenter(cs, tp, hdb, hc, filepath.Join(testdir, modules.RenterDir))
-	if err != nil {
-		return nil, err
-	}
-	m, err := miner.New(cs, tp, w, filepath.Join(testdir, modules.MinerDir))
-	if err != nil {
-		return nil, err
-	}
-
-	// Assemble all pieces into a renter tester.
-	rt := &renterTester{
-		cs:      cs,
-		gateway: g,
-		miner:   m,
-		tpool:   tp,
-		wallet:  w,
-
-		renter: r,
-	}
-
-	// Mine blocks until there is money in the wallet.
-	for i := types.BlockHeight(0); i <= types.MaturityDelay; i++ {
-		_, err := rt.miner.AddBlock()
-		if err != nil {
-			return nil, err
-		}
-	}
-	return rt, nil
-}
-
 // stubHostDB is the minimal implementation of the hostDB interface. It can be
 // embedded in other mock hostDB types, removing the need to reimplement all
 // of the hostDB's methods on every mock.
@@ -165,6 +107,18 @@ func (stubHostDB) AllHosts() []modules.HostDBEntry      { return nil }
 func (stubHostDB) AverageContractPrice() types.Currency { return types.Currency{} }
 func (stubHostDB) Close() error                         { return nil }
 func (stubHostDB) IsOffline(modules.NetAddress) bool    { return true }
+func (stubHostDB) RandomHosts(int, []types.SiaPublicKey) ([]modules.HostDBEntry, error) {
+	return []modules.HostDBEntry{}, nil
+}
+func (stubHostDB) EstimateHostScore(modules.HostDBEntry) modules.HostScoreBreakdown {
+	return modules.HostScoreBreakdown{}
+}
+func (stubHostDB) Host(types.SiaPublicKey) (modules.HostDBEntry, bool) {
+	return modules.HostDBEntry{}, false
+}
+func (stubHostDB) ScoreBreakdown(modules.HostDBEntry) modules.HostScoreBreakdown {
+	return modules.HostScoreBreakdown{}
+}
 
 // stubContractor is the minimal implementation of the hostContractor
 // interface.
@@ -181,4 +135,91 @@ func (stubContractor) IsOffline(modules.NetAddress) bool                      { 
 func (stubContractor) Editor(types.FileContractID) (contractor.Editor, error) { return nil, nil }
 func (stubContractor) Downloader(types.FileContractID) (contractor.Downloader, error) {
 	return nil, nil
+}
+
+type pricesStub struct {
+	stubHostDB
+
+	dbEntries []modules.HostDBEntry
+}
+
+func (ps pricesStub) RandomHosts(n int, exclude []types.SiaPublicKey) ([]modules.HostDBEntry, error) {
+	return ps.dbEntries, nil
+}
+
+// TestRenterPricesVolatility verifies that the renter caches its price
+// estimation, and subsequent calls result in non-volatile results.
+func TestRenterPricesVolatility(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+	rt, err := newRenterTester(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	// create a stubbed hostdb, query it with one contract, add another, verify
+	// the price estimation remains constant until the timeout has passed.
+	hdb := &pricesStub{}
+	id := rt.renter.mu.Lock()
+	rt.renter.hostDB = hdb
+	rt.renter.mu.Unlock(id)
+	dbe := modules.HostDBEntry{}
+	dbe.ContractPrice = types.SiacoinPrecision
+	dbe.DownloadBandwidthPrice = types.SiacoinPrecision
+	dbe.StoragePrice = types.SiacoinPrecision
+	dbe.UploadBandwidthPrice = types.SiacoinPrecision
+	hdb.dbEntries = append(hdb.dbEntries, dbe)
+	initial := rt.renter.PriceEstimation()
+	dbe.ContractPrice = dbe.ContractPrice.Mul64(2)
+	hdb.dbEntries = append(hdb.dbEntries, dbe)
+	after := rt.renter.PriceEstimation()
+	if !reflect.DeepEqual(initial, after) {
+		t.Log(initial)
+		t.Log(after)
+		t.Fatal("expected renter price estimation to be constant")
+	}
+	_, err = rt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after = rt.renter.PriceEstimation()
+	if reflect.DeepEqual(initial, after) {
+		t.Fatal("expected renter price estimation to change after mining a block")
+	}
+}
+
+// TestRenterSiapathValidate verifies that the validateSiapath function correctly validates SiaPaths.
+func TestRenterSiapathValidate(t *testing.T) {
+	var pathtests = []struct {
+		in    string
+		valid bool
+	}{
+		{"valid/siapath", true},
+		{"../../../directory/traversal", false},
+		{"testpath", true},
+		{"valid/siapath/../with/directory/traversal", false},
+		{"validpath/test", true},
+		{"..validpath/..test", true},
+		{"./invalid/path", false},
+		{".../path", true},
+		{"valid./path", true},
+		{"valid../path", true},
+		{"valid/path./test", true},
+		{"valid/path../test", true},
+		{"test/path", true},
+		{"/leading/slash", false},
+		{"foo/./bar", false},
+		{"", false},
+	}
+	for _, pathtest := range pathtests {
+		err := validateSiapath(pathtest.in)
+		if err != nil && pathtest.valid {
+			t.Fatal("validateSiapath failed on valid path: ", pathtest.in)
+		}
+		if err == nil && !pathtest.valid {
+			t.Fatal("validateSiapath succeeded on invalid path: ", pathtest.in)
+		}
+	}
 }

@@ -1,4 +1,4 @@
-# [![Sia Logo](http://sia.tech/img/svg/sia-green-logo.svg)](http://sia.tech) v1.2.2 (Blue Moon)
+# [![Sia Logo](http://sia.tech/img/svg/sia-green-logo.svg)](http://sia.tech) v1.3.3 (Capricorn)
 
 [![Build Status](https://travis-ci.org/NebulousLabs/Sia.svg?branch=master)](https://travis-ci.org/NebulousLabs/Sia)
 [![GoDoc](https://godoc.org/github.com/NebulousLabs/Sia?status.svg)](https://godoc.org/github.com/NebulousLabs/Sia)
@@ -50,8 +50,8 @@ keys.
 At the core of Sia is a blockchain that closely resembles Bitcoin.
 Transactions are conducted in Siacoin, a cryptocurrency. The blockchain is
 what allows Sia to enforce its smart contracts without relying on centralized
-authority. To acquire siacoins, use an exchange such as [Poloniex](https://poloniex.com), [Yunbi](https://yunbi.com), or
-[Bitsquare](https://bitsquare.io).
+authority. To acquire siacoins, use an exchange such as [Bittrex](https://bittrex.com), [Yunbi](https://yunbi.com), or
+[Bisq](https://www.bisq.io).
 
 To get started with Sia, check out the guides below:
 
@@ -88,19 +88,19 @@ files, and advertise yourself as a host.
 Building From Source
 --------------------
 
-To build from source, [Go 1.8 must be installed](https://golang.org/doc/install)
-on the system. Then simply use `go get`:
+To build from source, [Go 1.10 must be installed](https://golang.org/doc/install)
+on the system. Make sure your `$GOPATH` is set, and then simply use `go get`:
 
 ```
 go get -u github.com/NebulousLabs/Sia/...
 ```
 
-This will download the Sia repo to your `$GOPATH/src` folder, and install the
+This will download the Sia repo to your `$GOPATH/src` folder and install the
 `siad` and `siac` binaries in your `$GOPATH/bin` folder.
 
 To stay up-to-date, run the previous `go get` command again. Alternatively, you
 can use the Makefile provided in this repo. Run `git pull origin master` to
-pull the latest changes, and `make release-std` to build the new binaries. You
+pull the latest changes, and `make release` to build the new binaries. You
 can also run `make test` and `make test-long` to run the short and full test
 suites, respectively. Finally, `make cover` will generate code coverage reports
 for each package; they are stored in the `cover` folder and can be viewed in

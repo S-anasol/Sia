@@ -104,10 +104,6 @@ var (
 	// settings.
 	errLongDuration = ErrorCommunication("renter proposed a file contract with a too-long duration")
 
-	// errLowTransactionFees is returned if the renter provides a transaction
-	// that the host does not feel is able to make it onto the blockchain.
-	errLowTransactionFees = ErrorCommunication("rejected for including too few transaction fees")
-
 	// errLowHostMissedOutput is returned if the renter incorrectly updates the
 	// host missed proof output during a file contract revision.
 	errLowHostMissedOutput = ErrorCommunication("rejected for low paying host missed output")
@@ -115,6 +111,10 @@ var (
 	// errLowHostValidOutput is returned if the renter incorrectly updates the
 	// host valid proof output during a file contract revision.
 	errLowHostValidOutput = ErrorCommunication("rejected for low paying host valid output")
+
+	// errLowTransactionFees is returned if the renter provides a transaction
+	// that the host does not feel is able to make it onto the blockchain.
+	errLowTransactionFees = ErrorCommunication("rejected for including too few transaction fees")
 
 	// errLowVoidOutput is returned if the renter has not allocated enough
 	// funds to the void output.
@@ -164,7 +164,7 @@ func createRevisionSignature(fcr types.FileContractRevision, renterSig types.Tra
 // collateral, and then try submitting the file contract to the transaction
 // pool. If there is no error, the completed transaction set will be returned
 // to the caller.
-func (h *Host) managedFinalizeContract(builder modules.TransactionBuilder, renterPK crypto.PublicKey, renterSignatures []types.TransactionSignature, renterRevisionSignature types.TransactionSignature, initialSectorRoots []crypto.Hash, hostCollateral, hostInitialRevenue, hostInitialRisk types.Currency) ([]types.TransactionSignature, types.TransactionSignature, types.FileContractID, error) {
+func (h *Host) managedFinalizeContract(builder modules.TransactionBuilder, renterPK crypto.PublicKey, renterSignatures []types.TransactionSignature, renterRevisionSignature types.TransactionSignature, initialSectorRoots []crypto.Hash, hostCollateral, hostInitialRevenue, hostInitialRisk types.Currency, settings modules.HostExternalSettings) ([]types.TransactionSignature, types.TransactionSignature, types.FileContractID, error) {
 	for _, sig := range renterSignatures {
 		builder.AddTransactionSignature(sig)
 	}
@@ -213,7 +213,7 @@ func (h *Host) managedFinalizeContract(builder modules.TransactionBuilder, rente
 	so := storageObligation{
 		SectorRoots: initialSectorRoots,
 
-		ContractCost:            h.settings.MinContractPrice,
+		ContractCost:            settings.ContractPrice,
 		LockedCollateral:        hostCollateral,
 		PotentialStorageRevenue: hostInitialRevenue,
 		RiskedCollateral:        hostInitialRisk,

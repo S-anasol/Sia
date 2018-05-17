@@ -2,16 +2,17 @@ package wallet
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"reflect"
 	"time"
 
 	"github.com/NebulousLabs/Sia/encoding"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
+	"github.com/NebulousLabs/errors"
 	"github.com/NebulousLabs/fastrand"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 var (
@@ -19,6 +20,12 @@ var (
 	// chronological order. Only transactions relevant to the wallet are
 	// stored. The key of this bucket is an autoincrementing integer.
 	bucketProcessedTransactions = []byte("bucketProcessedTransactions")
+	// bucketProcessedTxnIndex maps a ProcessedTransactions ID to it's
+	// autoincremented index in bucketProcessedTransactions
+	bucketProcessedTxnIndex = []byte("bucketProcessedTxnKey")
+	// bucketAddrTransactions maps an UnlockHash to the
+	// ProcessedTransactions that it appears in.
+	bucketAddrTransactions = []byte("bucketAddrTransactions")
 	// bucketSiacoinOutputs maps a SiacoinOutputID to its SiacoinOutput. Only
 	// outputs that the wallet controls are stored. The wallet uses these
 	// outputs to fund transactions.
@@ -38,24 +45,26 @@ var (
 
 	dbBuckets = [][]byte{
 		bucketProcessedTransactions,
+		bucketProcessedTxnIndex,
+		bucketAddrTransactions,
 		bucketSiacoinOutputs,
 		bucketSiafundOutputs,
 		bucketSpentOutputs,
 		bucketWallet,
 	}
 
+	errNoKey = errors.New("key does not exist")
+
 	// these keys are used in bucketWallet
-	keyUID                    = []byte("keyUID")
+	keyAuxiliarySeedFiles     = []byte("keyAuxiliarySeedFiles")
+	keyConsensusChange        = []byte("keyConsensusChange")
+	keyConsensusHeight        = []byte("keyConsensusHeight")
 	keyEncryptionVerification = []byte("keyEncryptionVerification")
 	keyPrimarySeedFile        = []byte("keyPrimarySeedFile")
 	keyPrimarySeedProgress    = []byte("keyPrimarySeedProgress")
-	keyConsensusChange        = []byte("keyConsensusChange")
-	keyConsensusHeight        = []byte("keyConsensusHeight")
-	keySpendableKeyFiles      = []byte("keySpendableKeyFiles")
-	keyAuxiliarySeedFiles     = []byte("keyAuxiliarySeedFiles")
 	keySiafundPool            = []byte("keySiafundPool")
-
-	errNoKey = errors.New("key does not exist")
+	keySpendableKeyFiles      = []byte("keySpendableKeyFiles")
+	keyUID                    = []byte("keyUID")
 )
 
 // threadedDBUpdate commits the active database transaction and starts a new
@@ -73,25 +82,44 @@ func (w *Wallet) threadedDBUpdate() {
 			return
 		}
 		w.mu.Lock()
-		w.syncDB()
+		err := w.syncDB()
 		w.mu.Unlock()
+		if err != nil {
+			// If the database is having problems, we need to close it to
+			// protect it. This will likely cause a panic somewhere when another
+			// caller tries to access dbTx but it is nil.
+			w.log.Severe("ERROR: syncDB encountered an error. Closing database to protect wallet. wallet may crash:", err)
+			w.db.Close()
+			return
+		}
 	}
 }
 
 // syncDB commits the current global transaction and immediately begins a
 // new one. It must be called with a write-lock.
-func (w *Wallet) syncDB() {
+func (w *Wallet) syncDB() error {
+	// If the rollback flag is set, it means that somewhere in the middle of an
+	// atomic update there  was a failure, and that failure needs to be rolled
+	// back. An error will be returned.
+	if w.dbRollback {
+		w.dbTx.Rollback()
+		return errors.New("database unable to sync - rollback requested")
+	}
+
 	// commit the current tx
 	err := w.dbTx.Commit()
 	if err != nil {
 		w.log.Severe("ERROR: failed to apply database update:", err)
 		w.dbTx.Rollback()
+		return errors.AddContext(err, "unable to commit dbTx in syncDB")
 	}
 	// begin a new tx
 	w.dbTx, err = w.db.Begin(true)
 	if err != nil {
 		w.log.Severe("ERROR: failed to start database update:", err)
+		return errors.AddContext(err, "unable to begin new dbTx in syncDB")
 	}
+	return nil
 }
 
 // dbReset wipes and reinitializes a wallet database.
@@ -204,70 +232,186 @@ func dbDeleteSpentOutput(tx *bolt.Tx, id types.OutputID) error {
 	return dbDelete(tx.Bucket(bucketSpentOutputs), id)
 }
 
+func dbPutAddrTransactions(tx *bolt.Tx, addr types.UnlockHash, txns []uint64) error {
+	return dbPut(tx.Bucket(bucketAddrTransactions), addr, txns)
+}
+func dbGetAddrTransactions(tx *bolt.Tx, addr types.UnlockHash) (txns []uint64, err error) {
+	err = dbGet(tx.Bucket(bucketAddrTransactions), addr, &txns)
+	return
+}
+
+// dbAddAddrTransaction appends a single transaction index to the set of
+// transactions associated with addr. If the index is already in the set, it is
+// not added again.
+func dbAddAddrTransaction(tx *bolt.Tx, addr types.UnlockHash, txn uint64) error {
+	txns, err := dbGetAddrTransactions(tx, addr)
+	if err != nil && err != errNoKey {
+		return err
+	}
+	for _, i := range txns {
+		if i == txn {
+			return nil
+		}
+	}
+	return dbPutAddrTransactions(tx, addr, append(txns, txn))
+}
+
+// dbAddProcessedTransactionAddrs updates bucketAddrTransactions to associate
+// every address in pt with txn, which is assumed to be pt's index in
+// bucketProcessedTransactions.
+func dbAddProcessedTransactionAddrs(tx *bolt.Tx, pt modules.ProcessedTransaction, txn uint64) error {
+	addrs := make(map[types.UnlockHash]struct{})
+	for _, input := range pt.Inputs {
+		addrs[input.RelatedAddress] = struct{}{}
+	}
+	for _, output := range pt.Outputs {
+		// miner fees don't have an address, so skip them
+		if output.FundType == types.SpecifierMinerFee {
+			continue
+		}
+		addrs[output.RelatedAddress] = struct{}{}
+	}
+	for addr := range addrs {
+		if err := dbAddAddrTransaction(tx, addr, txn); err != nil {
+			return errors.AddContext(err, fmt.Sprintf("failed to add txn %v to address %v",
+				pt.TransactionID, addr))
+		}
+	}
+	return nil
+}
+
 // bucketProcessedTransactions works a little differently: the key is
 // meaningless, only used to order the transactions chronologically.
+
+// decodeProcessedTransaction decodes a marshalled processedTransaction
+func decodeProcessedTransaction(ptBytes []byte, pt *modules.ProcessedTransaction) error {
+	err := encoding.Unmarshal(ptBytes, pt)
+	if err != nil {
+		// COMPATv1.2.1: try decoding into old transaction type
+		var oldpt v121ProcessedTransaction
+		err = encoding.Unmarshal(ptBytes, &oldpt)
+		*pt = convertProcessedTransaction(oldpt)
+	}
+	return err
+}
+
+func dbDeleteTransactionIndex(tx *bolt.Tx, txid types.TransactionID) error {
+	return dbDelete(tx.Bucket(bucketProcessedTxnIndex), txid)
+}
+func dbPutTransactionIndex(tx *bolt.Tx, txid types.TransactionID, key []byte) error {
+	return dbPut(tx.Bucket(bucketProcessedTxnIndex), txid, key)
+}
+
+func dbGetTransactionIndex(tx *bolt.Tx, txid types.TransactionID) (key []byte, err error) {
+	key = make([]byte, 8)
+	err = dbGet(tx.Bucket(bucketProcessedTxnIndex), txid, &key)
+	return
+}
+
+// initProcessedTxnIndex initializes the bucketProcessedTxnIndex with the
+// elements from bucketProcessedTransactions
+func initProcessedTxnIndex(tx *bolt.Tx) error {
+	it := dbProcessedTransactionsIterator(tx)
+	indexBytes := make([]byte, 8)
+	for it.next() {
+		index, pt := it.key(), it.value()
+		binary.BigEndian.PutUint64(indexBytes, index)
+		if err := dbPutTransactionIndex(tx, pt.TransactionID, indexBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func dbAppendProcessedTransaction(tx *bolt.Tx, pt modules.ProcessedTransaction) error {
 	b := tx.Bucket(bucketProcessedTransactions)
 	key, err := b.NextSequence()
 	if err != nil {
-		return err
+		return errors.AddContext(err, "failed to get next sequence from bucket")
 	}
 	// big-endian is used so that the keys are properly sorted
 	keyBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(keyBytes, key)
-	return b.Put(keyBytes, encoding.Marshal(pt))
-}
-func dbGetLastProcessedTransaction(tx *bolt.Tx) (pt modules.ProcessedTransaction, err error) {
-	_, val := tx.Bucket(bucketProcessedTransactions).Cursor().Last()
-	err = encoding.Unmarshal(val, &pt)
-	if err != nil {
-		// COMPATv1.2.1: try decoding into old transaction type
-		var oldpt v121ProcessedTransaction
-		err = encoding.Unmarshal(val, &oldpt)
-		pt = convertProcessedTransaction(oldpt)
+	if err = b.Put(keyBytes, encoding.Marshal(pt)); err != nil {
+		return errors.AddContext(err, "failed to store processed txn in database")
 	}
+
+	// add used index to bucketProcessedTxnIndex
+	if err = dbPutTransactionIndex(tx, pt.TransactionID, keyBytes); err != nil {
+		return errors.AddContext(err, "failed to store txn index in database")
+	}
+
+	// also add this txid to the bucketAddrTransactions
+	if err = dbAddProcessedTransactionAddrs(tx, pt, key); err != nil {
+		return errors.AddContext(err, "failed to add processed transaction to addresses in database")
+	}
+	return nil
+}
+
+func dbGetLastProcessedTransaction(tx *bolt.Tx) (pt modules.ProcessedTransaction, err error) {
+	seq := tx.Bucket(bucketProcessedTransactions).Sequence()
+	keyBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(keyBytes, seq)
+	val := tx.Bucket(bucketProcessedTransactions).Get(keyBytes)
+	err = decodeProcessedTransaction(val, &pt)
 	return
 }
+
 func dbDeleteLastProcessedTransaction(tx *bolt.Tx) error {
-	// delete the last entry in the bucket. Note that we don't need to
-	// decrement the sequence integer; we only care that the next integer is
-	// larger than the previous one.
+	// Get the last processed txn.
+	pt, err := dbGetLastProcessedTransaction(tx)
+	if err != nil {
+		return errors.New("can't delete from empty bucket")
+	}
+	// Delete its txid from the index bucket.
+	if err := dbDeleteTransactionIndex(tx, pt.TransactionID); err != nil {
+		return errors.AddContext(err, "couldn't delete txn index")
+	}
+	// Delete the last processed txn and decrement the sequence.
 	b := tx.Bucket(bucketProcessedTransactions)
-	key, _ := b.Cursor().Last()
-	return b.Delete(key)
+	seq := b.Sequence()
+	keyBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(keyBytes, seq)
+	return errors.Compose(b.SetSequence(seq-1), b.Delete(keyBytes))
 }
-func dbForEachProcessedTransaction(tx *bolt.Tx, fn func(modules.ProcessedTransaction)) error {
-	return dbForEach(tx.Bucket(bucketProcessedTransactions), func(_ uint64, pt modules.ProcessedTransaction) {
-		fn(pt)
-	})
+
+func dbGetProcessedTransaction(tx *bolt.Tx, index uint64) (pt modules.ProcessedTransaction, err error) {
+	// big-endian is used so that the keys are properly sorted
+	indexBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(indexBytes, index)
+	val := tx.Bucket(bucketProcessedTransactions).Get(indexBytes)
+	err = decodeProcessedTransaction(val, &pt)
+	return
 }
 
 // A processedTransactionsIter iterates through the ProcessedTransactions bucket.
 type processedTransactionsIter struct {
-	c  *bolt.Cursor
-	pt modules.ProcessedTransaction
+	c   *bolt.Cursor
+	seq uint64
+	pt  modules.ProcessedTransaction
 }
 
 // next decodes the next ProcessedTransaction, returning false if the end of
 // the bucket has been reached.
 func (it *processedTransactionsIter) next() bool {
-	var ptBytes []byte
+	var seqBytes, ptBytes []byte
 	if it.pt.TransactionID == (types.TransactionID{}) {
 		// this is the first time next has been called, so cursor is not
 		// initialized yet
-		_, ptBytes = it.c.First()
+		seqBytes, ptBytes = it.c.First()
 	} else {
-		_, ptBytes = it.c.Next()
+		seqBytes, ptBytes = it.c.Next()
 	}
-	err := encoding.Unmarshal(ptBytes, &it.pt)
-	if err != nil {
-		// COMPATv1.2.1: try decoding into old transaction type
-		var oldpt v121ProcessedTransaction
-		err = encoding.Unmarshal(ptBytes, &oldpt)
-		it.pt = convertProcessedTransaction(oldpt)
+	if seqBytes == nil {
+		return false
 	}
-	return err == nil
+	it.seq = binary.BigEndian.Uint64(seqBytes)
+	return decodeProcessedTransaction(ptBytes, &it.pt) == nil
+}
+
+// key returns the key for the most recently decoded ProcessedTransaction.
+func (it *processedTransactionsIter) key() uint64 {
+	return it.seq
 }
 
 // value returns the most recently decoded ProcessedTransaction.

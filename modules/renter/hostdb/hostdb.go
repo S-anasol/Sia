@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
-	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/modules/renter/hostdb/hosttree"
 	"github.com/NebulousLabs/Sia/persist"
@@ -20,8 +20,11 @@ import (
 )
 
 var (
-	errNilCS      = errors.New("cannot create hostdb with nil consensus set")
-	errNilGateway = errors.New("cannot create hostdb with nil gateway")
+	// ErrInitialScanIncomplete is returned whenever an operation is not
+	// allowed to be executed before the initial host scan has finished.
+	ErrInitialScanIncomplete = errors.New("initial hostdb scan is not yet completed")
+	errNilCS                 = errors.New("cannot create hostdb with nil consensus set")
+	errNilGateway            = errors.New("cannot create hostdb with nil gateway")
 )
 
 // The HostDB is a database of potential hosts. It assigns a weight to each
@@ -30,7 +33,7 @@ var (
 type HostDB struct {
 	// dependencies
 	cs         modules.ConsensusSet
-	deps       dependencies
+	deps       modules.Dependencies
 	gateway    modules.Gateway
 	log        *persist.Logger
 	mu         sync.RWMutex
@@ -46,11 +49,12 @@ type HostDB struct {
 	// handful of goroutines constantly waiting on the channel for hosts to
 	// scan. The scan map is used to prevent duplicates from entering the scan
 	// pool.
-	scanList []modules.HostDBEntry
-	scanMap  map[string]struct{}
-	scanPool chan modules.HostDBEntry
-	scanWait bool
-	online   bool
+	initialScanComplete  bool
+	initialScanLatencies []time.Duration
+	scanList             []modules.HostDBEntry
+	scanMap              map[string]struct{}
+	scanWait             bool
+	scanningThreads      int
 
 	blockHeight types.BlockHeight
 	lastChange  modules.ConsensusChangeID
@@ -66,13 +70,13 @@ func New(g modules.Gateway, cs modules.ConsensusSet, persistDir string) (*HostDB
 		return nil, errNilCS
 	}
 	// Create HostDB using production dependencies.
-	return newHostDB(g, cs, persistDir, prodDependencies{})
+	return NewCustomHostDB(g, cs, persistDir, modules.ProdDependencies)
 }
 
-// newHostDB creates a HostDB using the provided dependencies. It loads the old
+// NewCustomHostDB creates a HostDB using the provided dependencies. It loads the old
 // persistence data, spawns the HostDB's scanning threads, and subscribes it to
 // the consensusSet.
-func newHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, deps dependencies) (*HostDB, error) {
+func NewCustomHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, deps modules.Dependencies) (*HostDB, error) {
 	// Create the HostDB object.
 	hdb := &HostDB{
 		cs:         cs,
@@ -80,8 +84,7 @@ func newHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, de
 		gateway:    g,
 		persistDir: persistDir,
 
-		scanMap:  make(map[string]struct{}),
-		scanPool: make(chan modules.HostDBEntry),
+		scanMap: make(map[string]struct{}),
 	}
 
 	// Create the persist directory if it does not yet exist.
@@ -127,7 +130,7 @@ func newHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, de
 
 	// Don't perform the remaining startup in the presence of a quitAfterLoad
 	// disruption.
-	if hdb.deps.disrupt("quitAfterLoad") {
+	if hdb.deps.Disrupt("quitAfterLoad") {
 		return hdb, nil
 	}
 
@@ -142,7 +145,7 @@ func newHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, de
 	}
 	hdb.mu.Unlock()
 
-	err = cs.ConsensusSetSubscribe(hdb, hdb.lastChange)
+	err = cs.ConsensusSetSubscribe(hdb, hdb.lastChange, hdb.tg.StopChan())
 	if err == modules.ErrInvalidConsensusChangeID {
 		// Subscribe again using the new ID. This will cause a triggered scan
 		// on all of the hosts, but that should be acceptable.
@@ -150,7 +153,7 @@ func newHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, de
 		hdb.blockHeight = 0
 		hdb.lastChange = modules.ConsensusChangeBeginning
 		hdb.mu.Unlock()
-		err = cs.ConsensusSetSubscribe(hdb, hdb.lastChange)
+		err = cs.ConsensusSetSubscribe(hdb, hdb.lastChange, hdb.tg.StopChan())
 	}
 	if err != nil {
 		return nil, errors.New("hostdb subscription failed: " + err.Error())
@@ -159,25 +162,13 @@ func newHostDB(g modules.Gateway, cs modules.ConsensusSet, persistDir string, de
 		cs.Unsubscribe(hdb)
 	})
 
-	// Spin up the host scanning processes.
-	if build.Release == "standard" {
-		go hdb.threadedOnlineCheck()
-	} else {
-		// During testing, the hostdb is just always assumed to be online, since
-		// the online check of having nonlocal peers will always fail.
-		hdb.mu.Lock()
-		hdb.online = true
-		hdb.mu.Unlock()
-	}
-	for i := 0; i < scanningThreads; i++ {
-		go hdb.threadedProbeHosts()
-	}
-
 	// Spawn the scan loop during production, but allow it to be disrupted
 	// during testing. Primary reason is so that we can fill the hostdb with
 	// fake hosts and not have them marked as offline as the scanloop operates.
-	if !hdb.deps.disrupt("disableScanLoop") {
+	if !hdb.deps.Disrupt("disableScanLoop") {
 		go hdb.threadedScan()
+	} else {
+		hdb.initialScanComplete = true
 	}
 
 	return hdb, nil
@@ -229,12 +220,25 @@ func (hdb *HostDB) Close() error {
 // Host returns the HostSettings associated with the specified NetAddress. If
 // no matching host is found, Host returns false.
 func (hdb *HostDB) Host(spk types.SiaPublicKey) (modules.HostDBEntry, bool) {
-	return hdb.hostTree.Select(spk)
+	host, exists := hdb.hostTree.Select(spk)
+	if !exists {
+		return host, exists
+	}
+	hdb.mu.RLock()
+	updateHostHistoricInteractions(&host, hdb.blockHeight)
+	hdb.mu.RUnlock()
+	return host, exists
 }
 
 // RandomHosts implements the HostDB interface's RandomHosts() method. It takes
 // a number of hosts to return, and a slice of netaddresses to ignore, and
 // returns a slice of entries.
-func (hdb *HostDB) RandomHosts(n int, excludeKeys []types.SiaPublicKey) []modules.HostDBEntry {
-	return hdb.hostTree.SelectRandom(n, excludeKeys)
+func (hdb *HostDB) RandomHosts(n int, excludeKeys []types.SiaPublicKey) ([]modules.HostDBEntry, error) {
+	hdb.mu.RLock()
+	initialScanComplete := hdb.initialScanComplete
+	hdb.mu.RUnlock()
+	if !initialScanComplete {
+		return []modules.HostDBEntry{}, ErrInitialScanIncomplete
+	}
+	return hdb.hostTree.SelectRandom(n, excludeKeys), nil
 }

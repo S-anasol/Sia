@@ -1,5 +1,5 @@
-// The explorer module provides a glimpse into what the Sia network
-// currently looks like.
+// Package explorer provides a glimpse into what the Sia network currently
+// looks like.
 package explorer
 
 import (
@@ -77,7 +77,7 @@ func New(cs modules.ConsensusSet, persistDir string) (*Explorer, error) {
 		return nil, err
 	}
 
-	err = cs.ConsensusSetSubscribe(e, recentChange)
+	err = cs.ConsensusSetSubscribe(e, recentChange, nil)
 	if err != nil {
 		// TODO: restart from 0
 		return nil, errors.New("explorer subscription failed: " + err.Error())

@@ -6,14 +6,17 @@ package host
 // correctly.
 
 import (
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 	"github.com/NebulousLabs/fastrand"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 // randSector creates a random sector, returning the sector along with the
@@ -28,12 +31,15 @@ func randSector() (crypto.Hash, []byte) {
 // contract that will form the foundation of a storage obligation.
 func (ht *hostTester) newTesterStorageObligation() (storageObligation, error) {
 	// Create the file contract that will be used in the obligation.
-	builder := ht.wallet.StartTransaction()
+	builder, err := ht.wallet.StartTransaction()
+	if err != nil {
+		return storageObligation{}, err
+	}
 	// Fund the file contract with a payout. The payout needs to be big enough
 	// that the expected revenue is larger than the fee that the host may end
 	// up paying.
 	payout := types.SiacoinPrecision.Mul64(1e3)
-	err := builder.FundSiacoins(payout)
+	err = builder.FundSiacoins(payout)
 	if err != nil {
 		return storageObligation{}, err
 	}
@@ -584,7 +590,7 @@ func TestMultiSectorStorageObligationStack(t *testing.T) {
 // TestAutoRevisionSubmission checks that the host correctly submits a file
 // contract revision to the consensus set.
 func TestAutoRevisionSubmission(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || !build.VLONG {
 		t.SkipNow()
 	}
 	t.Parallel()
@@ -683,24 +689,30 @@ func TestAutoRevisionSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = ht.host.db.View(func(tx *bolt.Tx) error {
-		so, err = getStorageObligation(tx, so.id())
+	err = build.Retry(50, 250*time.Millisecond, func() error {
+		err = ht.host.db.View(func(tx *bolt.Tx) error {
+			so, err = getStorageObligation(tx, so.id())
+			if err != nil {
+				return err
+			}
+			return nil
+		})
 		if err != nil {
-			return err
+			return (err)
+		}
+		if !so.OriginConfirmed {
+			return errors.New("origin transaction for storage obligation was not confirmed after blocks were mined")
+		}
+		if !so.RevisionConfirmed {
+			return errors.New("revision transaction for storage obligation was not confirmed after blocks were mined")
+		}
+		if !so.ProofConfirmed {
+			return errors.New("storage obligation is not saying that the storage proof was confirmed on the blockchain")
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !so.OriginConfirmed {
-		t.Fatal("origin transaction for storage obligation was not confirmed after blocks were mined")
-	}
-	if !so.RevisionConfirmed {
-		t.Fatal("revision transaction for storage obligation was not confirmed after blocks were mined")
-	}
-	if !so.ProofConfirmed {
-		t.Fatal("storage obligation is not saying that the storage proof was confirmed on the blockchain")
 	}
 
 	// Mine blocks until the storage proof has enough confirmations that the

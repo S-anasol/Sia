@@ -4,12 +4,17 @@ import (
 	"time"
 
 	"github.com/NebulousLabs/Sia/build"
+	"github.com/NebulousLabs/Sia/modules"
 )
 
 const (
 	// handshakeUpgradeVersion is the version where the gateway handshake RPC
-	// was altered to include adiitional information transfer.
+	// was altered to include additional information transfer.
 	handshakeUpgradeVersion = "1.0.0"
+
+	// maxEncodedSessionHeaderSize is the maximum allowed size of an encoded
+	// sessionHeader object.
+	maxEncodedSessionHeaderSize = 40 + modules.MaxEncodedNetAddressLength
 
 	// maxLocalOutbound is currently set to 3, meaning the gateway will not
 	// consider a local node to be an outbound peer if the gateway already has
@@ -23,12 +28,17 @@ const (
 	// minAcceptableVersion is the version below which the gateway will refuse to
 	// connect to peers and reject connection attempts.
 	//
-	// Reject peers < v0.4.0 as the previous version is v0.3.3 which is
-	// pre-hardfork.
-	minAcceptableVersion = "0.4.0"
+	// Reject peers < v1.3.0 due to hardfork.
+	minAcceptableVersion = "1.3.0"
 
 	// saveFrequency defines how often the gateway saves its persistence.
 	saveFrequency = time.Minute * 2
+
+	// minimumAcceptablePeerVersion is the oldest version for which we accept
+	// incoming connections. This version is usually raised if changes to the
+	// codebase were made that weren't backwards compatible. This might include
+	// changes to the protocol or hardforks.
+	minimumAcceptablePeerVersion = "1.3.1"
 )
 
 var (
@@ -57,19 +67,19 @@ var (
 		Testing:  uint64(3),
 	}).(uint64)
 
-	// nodePurgeDelay defines the amount of time that is waited between each
-	// iteration of the node purge loop.
-	nodePurgeDelay = build.Select(build.Var{
-		Standard: 10 * time.Minute,
-		Dev:      20 * time.Second,
-		Testing:  500 * time.Millisecond,
-	}).(time.Duration)
-
 	// nodeListDelay defines the amount of time that is waited between each
 	// iteration of the node list loop.
 	nodeListDelay = build.Select(build.Var{
 		Standard: 5 * time.Second,
 		Dev:      3 * time.Second,
+		Testing:  500 * time.Millisecond,
+	}).(time.Duration)
+
+	// nodePurgeDelay defines the amount of time that is waited between each
+	// iteration of the node purge loop.
+	nodePurgeDelay = build.Select(build.Var{
+		Standard: 10 * time.Minute,
+		Dev:      20 * time.Second,
 		Testing:  500 * time.Millisecond,
 	}).(time.Duration)
 
@@ -200,5 +210,49 @@ var (
 		Standard: 5 * time.Minute,
 		Dev:      3 * time.Minute,
 		Testing:  5 * time.Second,
+	}).(time.Duration)
+)
+
+var (
+	// minPeersForIPDiscovery is the minimum number of peer connections we wait
+	// for before we try to discover our public ip from them. It is also the
+	// minimum number of successful replies we expect from our peers before we
+	// accept a result.
+	minPeersForIPDiscovery = build.Select(build.Var{
+		Standard: 5,
+		Dev:      3,
+		Testing:  2,
+	}).(int)
+
+	// timeoutIPDiscovery is the time after which managedIPFromPeers will fail
+	// if the ip couldn't be discovered successfully.
+	timeoutIPDiscovery = build.Select(build.Var{
+		Standard: 5 * time.Minute,
+		Dev:      5 * time.Minute,
+		Testing:  time.Minute,
+	}).(time.Duration)
+
+	// rediscoverIPIntervalSuccess is the time that has to pass after a
+	// successful IP discovery before we rediscover the IP.
+	rediscoverIPIntervalSuccess = build.Select(build.Var{
+		Standard: 3 * time.Hour,
+		Dev:      10 * time.Minute,
+		Testing:  30 * time.Second,
+	}).(time.Duration)
+
+	// rediscoverIPIntervalFailure is the time that has to pass after a failed
+	// IP discovery before we try again.
+	rediscoverIPIntervalFailure = build.Select(build.Var{
+		Standard: 15 * time.Minute,
+		Dev:      1 * time.Minute,
+		Testing:  10 * time.Second,
+	}).(time.Duration)
+
+	// peerDiscoveryRetryInterval is the time we wait when there were not
+	// enough peers to determine our public ip address before trying again.
+	peerDiscoveryRetryInterval = build.Select(build.Var{
+		Standard: 10 * time.Second,
+		Dev:      1 * time.Second,
+		Testing:  100 * time.Millisecond,
 	}).(time.Duration)
 )

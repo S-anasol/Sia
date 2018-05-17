@@ -1,3 +1,4 @@
+// Package miner is responsible for creating and submitting siacoin blocks
 package miner
 
 import (
@@ -15,6 +16,15 @@ import (
 )
 
 var (
+	// BlockMemory is the maximum number of blocks the miner will store
+	// Blocks take up to 2 megabytes of memory, which is why this number is
+	// limited.
+	BlockMemory = build.Select(build.Var{
+		Standard: 50,
+		Dev:      10,
+		Testing:  5,
+	}).(int)
+
 	errNilCS     = errors.New("miner cannot use a nil consensus set")
 	errNilTpool  = errors.New("miner cannot use a nil transaction pool")
 	errNilWallet = errors.New("miner cannot use a nil wallet")
@@ -30,15 +40,6 @@ var (
 		Testing:  50,
 	}).(int)
 
-	// BlockMemory is the maximum number of blocks the miner will store
-	// Blocks take up to 2 megabytes of memory, which is why this number is
-	// limited.
-	BlockMemory = build.Select(build.Var{
-		Standard: 50,
-		Dev:      10,
-		Testing:  5,
-	}).(int)
-
 	// MaxSourceBlockAge is the maximum amount of time that is allowed to
 	// elapse between generating source blocks.
 	MaxSourceBlockAge = build.Select(build.Var{
@@ -48,7 +49,7 @@ var (
 	}).(time.Duration)
 )
 
-// splitSet defines a transaction set that can be added componenet-wise to a
+// splitSet defines a transaction set that can be added components-wise to a
 // block. It's split because it doesn't necessarily represent the full set
 // prpovided by the transaction pool. Splits can be sorted so that the largest
 // and most valuable sets can be selected when picking transactions.
@@ -57,6 +58,8 @@ type splitSet struct {
 	size         uint64
 	transactions []types.Transaction
 }
+
+type splitSetID int
 
 // Miner struct contains all variables the miner needs
 // in order to create and submit blocks.
@@ -85,9 +88,13 @@ type Miner struct {
 	memProgress     int                                            // The index of the most recent header used in headerMem.
 
 	// Transaction pool variables.
-	fullSets   map[modules.TransactionSetID][]int
-	setCounter int
-	splitSets  map[int]*splitSet
+	fullSets           map[modules.TransactionSetID][]int
+	blockMapHeap       *mapHeap
+	overflowMapHeap    *mapHeap
+	setCounter         int
+	splitSets          map[splitSetID]*splitSet
+	splitSetIDFromTxID map[types.TransactionID]splitSetID
+	unsolvedBlockIndex map[types.TransactionID]int
 
 	// CPUMiner variables.
 	miningOn bool  // indicates if the miner is supposed to be running
@@ -128,7 +135,7 @@ func (m *Miner) startupRescan() error {
 
 	// Subscribe to the consensus set. This is a blocking call that will not
 	// return until the miner has fully caught up to the current block.
-	err = m.cs.ConsensusSetSubscribe(m, modules.ConsensusChangeBeginning)
+	err = m.cs.ConsensusSetSubscribe(m, modules.ConsensusChangeBeginning, m.tg.StopChan())
 	if err != nil {
 		return err
 	}
@@ -165,7 +172,19 @@ func New(cs modules.ConsensusSet, tpool modules.TransactionPool, w modules.Walle
 		headerMem:  make([]types.BlockHeader, HeaderMemory),
 
 		fullSets:  make(map[modules.TransactionSetID][]int),
-		splitSets: make(map[int]*splitSet),
+		splitSets: make(map[splitSetID]*splitSet),
+		blockMapHeap: &mapHeap{
+			selectID: make(map[splitSetID]*mapElement),
+			data:     nil,
+			minHeap:  true,
+		},
+		overflowMapHeap: &mapHeap{
+			selectID: make(map[splitSetID]*mapElement),
+			data:     nil,
+			minHeap:  false,
+		},
+		splitSetIDFromTxID: make(map[types.TransactionID]splitSetID),
+		unsolvedBlockIndex: make(map[types.TransactionID]int),
 
 		persistDir: persistDir,
 	}
@@ -175,7 +194,7 @@ func New(cs modules.ConsensusSet, tpool modules.TransactionPool, w modules.Walle
 		return nil, errors.New("miner persistence startup failed: " + err.Error())
 	}
 
-	err = m.cs.ConsensusSetSubscribe(m, m.persist.RecentChange)
+	err = m.cs.ConsensusSetSubscribe(m, m.persist.RecentChange, m.tg.StopChan())
 	if err == modules.ErrInvalidConsensusChangeID {
 		// Perform a rescan of the consensus set if the change id is not found.
 		// The id will only be not found if there has been desynchronization
@@ -230,7 +249,18 @@ func (m *Miner) Close() error {
 // checkAddress checks that the miner has an address, fetching an address from
 // the wallet if not.
 func (m *Miner) checkAddress() error {
-	if m.persist.Address != (types.UnlockHash{}) {
+	addrs, err := m.wallet.AllAddresses()
+	if err != nil {
+		return err
+	}
+	hasAddr := false
+	for _, addr := range addrs {
+		if m.persist.Address == addr {
+			hasAddr = true
+			break
+		}
+	}
+	if m.persist.Address != (types.UnlockHash{}) && hasAddr {
 		return nil
 	}
 	uc, err := m.wallet.NextAddress()

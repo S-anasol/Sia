@@ -45,6 +45,13 @@ func (g *Gateway) managedRPC(addr modules.NetAddress, name string, fn modules.RP
 
 	conn, err := peer.open()
 	if err != nil {
+		// peer probably disconnected without sending a shutdown signal;
+		// disconnect from them
+		g.log.Debugf("Could not initiate RPC with %v; disconnecting", addr)
+		peer.sess.Close()
+		g.mu.Lock()
+		delete(g.peers, addr)
+		g.mu.Unlock()
 		return err
 	}
 	defer conn.Close()
@@ -134,12 +141,12 @@ func (g *Gateway) threadedListenPeer(p *peer) {
 	defer g.peerTG.Done()
 
 	// Spin up a goroutine to listen for a shutdown signal from both the peer
-	// and from the gateway. In the event of either, close the muxado session.
+	// and from the gateway. In the event of either, close the session.
 	connClosedChan := make(chan struct{})
 	peerCloseChan := make(chan struct{})
 	go func() {
-		// Signal that the muxado session has been successfully closed, and
-		// that this goroutine has terminated.
+		// Signal that the session has been successfully closed, and that this
+		// goroutine has terminated.
 		defer close(connClosedChan)
 
 		// Listen for a stop signal.
@@ -148,13 +155,11 @@ func (g *Gateway) threadedListenPeer(p *peer) {
 		case <-peerCloseChan:
 		}
 
-		// Can't call Disconnect because it could return sync.ErrStopped.
+		// Close the session and remove p from the peer list.
+		p.sess.Close()
 		g.mu.Lock()
 		delete(g.peers, p.NetAddress)
 		g.mu.Unlock()
-		if err := p.sess.Close(); err != nil {
-			g.log.Debugf("WARN: error disconnecting from peer %q: %v", p.NetAddress, err)
-		}
 	}()
 
 	for {

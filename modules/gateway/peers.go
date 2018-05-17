@@ -9,8 +9,8 @@ import (
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/encoding"
 	"github.com/NebulousLabs/Sia/modules"
+	"github.com/NebulousLabs/Sia/types"
 	"github.com/NebulousLabs/fastrand"
-	"github.com/NebulousLabs/muxado"
 )
 
 var (
@@ -36,7 +36,16 @@ func (s invalidVersionError) Error() string {
 
 type peer struct {
 	modules.Peer
-	sess muxado.Session
+	sess streamSession
+}
+
+// sessionHeader is sent after the initial version exchange. It prevents peers
+// on different blockchains from connecting to each other, and prevents the
+// gateway from connecting to itself.
+type sessionHeader struct {
+	GenesisID  types.BlockID
+	UniqueID   gatewayID
+	NetAddress modules.NetAddress
 }
 
 func (p *peer) open() (modules.PeerConn, error) {
@@ -55,8 +64,8 @@ func (p *peer) accept() (modules.PeerConn, error) {
 	return &peerConn{conn, p.NetAddress}, nil
 }
 
-// addPeer adds a peer to the Gateway's peer list and spawns a listener thread
-// to handle its requests.
+// addPeer adds a peer to the Gateway's peer list, spawns a listener thread to
+// handle its requests and increments the remotePeers accordingly
 func (g *Gateway) addPeer(p *peer) {
 	g.peers[p.NetAddress] = p
 	go g.threadedListenPeer(p)
@@ -119,90 +128,96 @@ func (g *Gateway) threadedAcceptConn(conn net.Conn) {
 	addr := modules.NetAddress(conn.RemoteAddr().String())
 	g.log.Debugf("INFO: %v wants to connect", addr)
 
-	remoteVersion, err := acceptConnVersionHandshake(conn, build.Version)
+	remoteVersion, err := acceptVersionHandshake(conn, build.Version)
 	if err != nil {
 		g.log.Debugf("INFO: %v wanted to connect but version handshake failed: %v", addr, err)
 		conn.Close()
 		return
 	}
 
-	if build.VersionCmp(remoteVersion, handshakeUpgradeVersion) < 0 {
-		err = g.managedAcceptConnOldPeer(conn, remoteVersion)
+	if build.VersionCmp(remoteVersion, minimumAcceptablePeerVersion) >= 0 {
+		err = g.managedAcceptConnPeer(conn, remoteVersion)
 	} else {
-		err = g.managedAcceptConnNewPeer(conn, remoteVersion)
+		err = errors.New("version number is below threshold")
 	}
 	if err != nil {
 		g.log.Debugf("INFO: %v wanted to connect, but failed: %v", addr, err)
 		conn.Close()
 		return
 	}
+
 	// Handshake successful, remove the deadline.
 	conn.SetDeadline(time.Time{})
 
 	g.log.Debugf("INFO: accepted connection from new peer %v (v%v)", addr, remoteVersion)
 }
 
-// managedAcceptConnOldPeer accepts a connection request from peers < v1.0.0.
-// The requesting peer is added as a peer, but is not added to the node list
-// (older peers do not share their dialback address). The peer is only added if
-// a nil error is returned.
-func (g *Gateway) managedAcceptConnOldPeer(conn net.Conn, remoteVersion string) error {
-	addr := modules.NetAddress(conn.RemoteAddr().String())
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// Old peers are unable to give us a dialback port, so we can't verify
-	// whether or not they are local peers.
-	g.acceptPeer(&peer{
-		Peer: modules.Peer{
-			Inbound:    true,
-			Local:      false,
-			NetAddress: addr,
-			Version:    remoteVersion,
-		},
-		sess: muxado.Server(conn),
-	})
-	g.addNode(addr)
+// acceptableSessionHeader returns an error if remoteHeader indicates a peer
+// that should not be connected to.
+func acceptableSessionHeader(ourHeader, remoteHeader sessionHeader, remoteAddr string) error {
+	if remoteHeader.GenesisID != ourHeader.GenesisID {
+		return errPeerGenesisID
+	} else if remoteHeader.UniqueID == ourHeader.UniqueID {
+		return errOurAddress
+	} else if err := remoteHeader.NetAddress.IsStdValid(); err != nil {
+		return fmt.Errorf("invalid remote address: %v", err)
+	}
 	return nil
 }
 
-// managedAcceptConnNewPeer accepts connection requests from peers >= v1.0.0.
+// managedAcceptConnPeer accepts connection requests from peers >= v1.3.1.
 // The requesting peer is added as a node and a peer. The peer is only added if
 // a nil error is returned.
-func (g *Gateway) managedAcceptConnNewPeer(conn net.Conn, remoteVersion string) error {
-	// Learn the peer's dialback address. Peers older than v1.0.0 will only be
-	// able to be discovered by newer peers via the ShareNodes RPC.
-	remoteAddr, err := acceptConnPortHandshake(conn)
+func (g *Gateway) managedAcceptConnPeer(conn net.Conn, remoteVersion string) error {
+	g.log.Debugln("Sending sessionHeader with address", g.myAddr, g.myAddr.IsLocal())
+	// Perform header handshake.
+	g.mu.RLock()
+	ourHeader := sessionHeader{
+		GenesisID:  types.GenesisID,
+		UniqueID:   g.staticId,
+		NetAddress: g.myAddr,
+	}
+	g.mu.RUnlock()
+
+	remoteHeader, err := exchangeRemoteHeader(conn, ourHeader)
 	if err != nil {
 		return err
 	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	// Don't accept a connection from a peer we're already connected to.
-	if _, exists := g.peers[remoteAddr]; exists {
-		return fmt.Errorf("already connected to a peer on that address: %v", remoteAddr)
+	if err := exchangeOurHeader(conn, ourHeader); err != nil {
+		return err
 	}
+
+	// Get the remote address on which the connecting peer is listening on.
+	// This means we need to combine the incoming connections ip address with
+	// the announced open port of the peer.
+	remoteIP := modules.NetAddress(conn.RemoteAddr().String()).Host()
+	remotePort := remoteHeader.NetAddress.Port()
+	remoteAddr := modules.NetAddress(net.JoinHostPort(remoteIP, remotePort))
+
 	// Accept the peer.
-	g.acceptPeer(&peer{
+	peer := &peer{
 		Peer: modules.Peer{
 			Inbound: true,
-			// NOTE: local may be true even if the supplied remoteAddr is not
+			// NOTE: local may be true even if the supplied NetAddress is not
 			// actually reachable.
-			Local:      remoteAddr.IsLocal(),
+			Local: remoteAddr.IsLocal(),
+			// Ignoring claimed IP address (which should be == to the socket address)
+			// by the host but keeping note of the port number so we can call back
 			NetAddress: remoteAddr,
 			Version:    remoteVersion,
 		},
-		sess: muxado.Server(conn),
-	})
+		sess: newServerStream(conn, remoteVersion),
+	}
+	g.mu.Lock()
+	g.acceptPeer(peer)
+	g.mu.Unlock()
 
 	// Attempt to ping the supplied address. If successful, we will add
-	// remoteAddr to our node list after accepting the peer. We do this in a
-	// goroutine so that we can start communicating with the peer immediately.
+	// remoteHeader.NetAddress to our node list after accepting the peer. We
+	// do this in a goroutine so that we can begin communicating with the peer
+	// immediately.
 	go func() {
-		err := g.pingNode(remoteAddr)
+		err := g.staticPingNode(remoteAddr)
 		if err == nil {
 			g.mu.Lock()
 			g.addNode(remoteAddr)
@@ -253,45 +268,6 @@ func (g *Gateway) acceptPeer(p *peer) {
 	g.addPeer(p)
 }
 
-// acceptConnPortHandshake performs the port handshake and should be called on
-// the side accepting a connection request. The remote address is only returned
-// if err == nil.
-func acceptConnPortHandshake(conn net.Conn) (remoteAddr modules.NetAddress, err error) {
-	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
-	if err != nil {
-		return "", err
-	}
-
-	// Read the peer's port that we can dial them back on.
-	var dialbackPort string
-	err = encoding.ReadObject(conn, &dialbackPort, 13) // Max port # is 65535 (5 digits long) + 8 byte string length prefix
-	if err != nil {
-		return "", fmt.Errorf("could not read remote peer's port: %v", err)
-	}
-	remoteAddr = modules.NetAddress(net.JoinHostPort(host, dialbackPort))
-	if err := remoteAddr.IsStdValid(); err != nil {
-		return "", fmt.Errorf("peer's address (%v) is invalid: %v", remoteAddr, err)
-	}
-	// Sanity check to ensure that appending the port string to the host didn't
-	// change the host. Only necessary because the peer sends the port as a string
-	// instead of an integer.
-	if remoteAddr.Host() != host {
-		return "", fmt.Errorf("peer sent a port which modified the host")
-	}
-	return remoteAddr, nil
-}
-
-// connectPortHandshake performs the port handshake and should be called on the
-// side initiating the connection request. This shares our port with the peer
-// so they can connect to us in the future.
-func connectPortHandshake(conn net.Conn, port string) error {
-	err := encoding.WriteObject(conn, port)
-	if err != nil {
-		return errors.New("could not write port #: " + err.Error())
-	}
-	return nil
-}
-
 // acceptableVersion returns an error if the version is unacceptable.
 func acceptableVersion(version string) error {
 	if !build.IsVersion(version) {
@@ -325,10 +301,10 @@ func connectVersionHandshake(conn net.Conn, version string) (remoteVersion strin
 	return remoteVersion, nil
 }
 
-// acceptConnVersionHandshake performs the version handshake and should be
+// acceptVersionHandshake performs the version handshake and should be
 // called on the side accepting a connection request. The remote version is
 // only returned if err == nil.
-func acceptConnVersionHandshake(conn net.Conn, version string) (remoteVersion string, err error) {
+func acceptVersionHandshake(conn net.Conn, version string) (remoteVersion string, err error) {
 	// Read remote version.
 	if err := encoding.ReadObject(conn, &remoteVersion, build.MaxEncodedVersionLength); err != nil {
 		return "", fmt.Errorf("failed to read remote version: %v", err)
@@ -347,66 +323,62 @@ func acceptConnVersionHandshake(conn net.Conn, version string) (remoteVersion st
 	return remoteVersion, nil
 }
 
-// managedConnectOldPeer connects to peers < v1.0.0. The peer is added as a
-// node and a peer. The peer is only added if a nil error is returned.
-func (g *Gateway) managedConnectOldPeer(conn net.Conn, remoteVersion string, remoteAddr modules.NetAddress) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.addPeer(&peer{
-		Peer: modules.Peer{
-			Inbound:    false,
-			Local:      remoteAddr.IsLocal(),
-			NetAddress: remoteAddr,
-			Version:    remoteVersion,
-		},
-		sess: muxado.Client(conn),
-	})
-	// Add the peer to the node list. We can ignore the error: addNode
-	// validates the address and checks for duplicates, but we don't care
-	// about duplicates and we have already validated the address by
-	// connecting to it.
-	g.addNode(remoteAddr)
-	// We want to persist the outbound peers.
-	err := g.saveSync()
-	if err != nil {
-		g.log.Println("ERROR: Unable to save new outbound peer to gateway:", err)
+// exchangeOurHeader writes ourHeader and reads the remote's error response.
+func exchangeOurHeader(conn net.Conn, ourHeader sessionHeader) error {
+	// Send our header.
+	if err := encoding.WriteObject(conn, ourHeader); err != nil {
+		return fmt.Errorf("failed to write header: %v", err)
+	}
+
+	// Read remote response.
+	var response string
+	if err := encoding.ReadObject(conn, &response, 100); err != nil {
+		return fmt.Errorf("failed to read header acceptance: %v", err)
+	} else if response == modules.StopResponse {
+		return errors.New("peer did not want a connection")
+	} else if response != modules.AcceptResponse {
+		return fmt.Errorf("peer rejected our header: %v", response)
 	}
 	return nil
 }
 
-// managedConnectNewPeer connects to peers >= v1.0.0. The peer is added as a
-// node and a peer. The peer is only added if a nil error is returned.
-func (g *Gateway) managedConnectNewPeer(conn net.Conn, remoteVersion string, remoteAddr modules.NetAddress) error {
-	g.mu.RLock()
-	port := g.port
-	g.mu.RUnlock()
-	// Send our dialable address to the peer so they can dial us back should we
-	// disconnect.
-	err := connectPortHandshake(conn, port)
-	if err != nil {
-		return err
+// exchangeRemoteHeader reads the remote header and writes an error response.
+func exchangeRemoteHeader(conn net.Conn, ourHeader sessionHeader) (sessionHeader, error) {
+	// Read remote header.
+	var remoteHeader sessionHeader
+	if err := encoding.ReadObject(conn, &remoteHeader, maxEncodedSessionHeaderSize); err != nil {
+		return sessionHeader{}, fmt.Errorf("failed to read remote header: %v", err)
 	}
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.addPeer(&peer{
-		Peer: modules.Peer{
-			Inbound:    false,
-			Local:      remoteAddr.IsLocal(),
-			NetAddress: remoteAddr,
-			Version:    remoteVersion,
-		},
-		sess: muxado.Client(conn),
-	})
-	// Add the peer to the node list. We can ignore the error: addNode
-	// validates the address and checks for duplicates, but we don't care
-	// about duplicates and we have already validated the address by
-	// connecting to it.
-	g.addNode(remoteAddr)
-	// We want to persist the outbound peers.
-	err = g.saveSync()
+	// Validate remote header and write acceptance or rejection.
+	err := acceptableSessionHeader(ourHeader, remoteHeader, conn.RemoteAddr().String())
 	if err != nil {
-		g.log.Println("ERROR: Unable to save new outbound peer to gateway:", err)
+		encoding.WriteObject(conn, err.Error()) // error can be ignored
+		return sessionHeader{}, fmt.Errorf("peer's header was not acceptable: %v", err)
+	} else if err := encoding.WriteObject(conn, modules.AcceptResponse); err != nil {
+		return sessionHeader{}, fmt.Errorf("failed to write header acceptance: %v", err)
+	}
+
+	return remoteHeader, nil
+}
+
+// managedConnectPeer connects to peers >= v1.3.1. The peer is added as a
+// node and a peer. The peer is only added if a nil error is returned.
+func (g *Gateway) managedConnectPeer(conn net.Conn, remoteVersion string, remoteAddr modules.NetAddress) error {
+	g.log.Debugln("Sending sessionHeader with address", g.myAddr, g.myAddr.IsLocal())
+	// Perform header handshake.
+	g.mu.RLock()
+	ourHeader := sessionHeader{
+		GenesisID:  types.GenesisID,
+		UniqueID:   g.staticId,
+		NetAddress: g.myAddr,
+	}
+	g.mu.RUnlock()
+
+	if err := exchangeOurHeader(conn, ourHeader); err != nil {
+		return err
+	} else if _, err := exchangeRemoteHeader(conn, ourHeader); err != nil {
+		return err
 	}
 	return nil
 }
@@ -435,7 +407,7 @@ func (g *Gateway) managedConnect(addr modules.NetAddress) error {
 	}
 
 	// Dial the peer and perform peer initialization.
-	conn, err := g.dial(addr)
+	conn, err := g.staticDial(addr)
 	if err != nil {
 		return err
 	}
@@ -446,23 +418,44 @@ func (g *Gateway) managedConnect(addr modules.NetAddress) error {
 		conn.Close()
 		return err
 	}
-	if build.VersionCmp(remoteVersion, handshakeUpgradeVersion) < 0 {
-		err = g.managedConnectOldPeer(conn, remoteVersion, addr)
+
+	if build.VersionCmp(remoteVersion, minimumAcceptablePeerVersion) >= 0 {
+		err = g.managedConnectPeer(conn, remoteVersion, addr)
 	} else {
-		err = g.managedConnectNewPeer(conn, remoteVersion, addr)
+		err = errors.New("version number is below threshold")
 	}
 	if err != nil {
 		conn.Close()
 		return err
 	}
-	g.log.Debugln("INFO: connected to new peer", addr)
 
 	// Connection successful, clear the timeout as to maintain a persistent
 	// connection to this peer.
 	conn.SetDeadline(time.Time{})
 
+	// Add the peer.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.addPeer(&peer{
+		Peer: modules.Peer{
+			Inbound:    false,
+			Local:      addr.IsLocal(),
+			NetAddress: addr,
+			Version:    remoteVersion,
+		},
+		sess: newClientStream(conn, remoteVersion),
+	})
+	g.addNode(addr)
+	g.nodes[addr].WasOutboundPeer = true
+
+	if err := g.saveSync(); err != nil {
+		g.log.Println("ERROR: Unable to save new outbound peer to gateway:", err)
+	}
+
+	g.log.Debugln("INFO: connected to new peer", addr)
+
 	// call initRPCs
-	g.mu.RLock()
 	for name, fn := range g.initRPCs {
 		go func(name string, fn modules.RPCFunc) {
 			if g.threads.Add() != nil {
@@ -476,7 +469,6 @@ func (g *Gateway) managedConnect(addr modules.NetAddress) error {
 			}
 		}(name, fn)
 	}
-	g.mu.RUnlock()
 
 	return nil
 }
@@ -505,12 +497,14 @@ func (g *Gateway) Disconnect(addr modules.NetAddress) error {
 	if !exists {
 		return errors.New("not connected to that node")
 	}
+
+	p.sess.Close()
 	g.mu.Lock()
+	// Peer is removed from the peer list as well as the node list, to prevent
+	// the node from being re-connected while looking for a replacement peer.
 	delete(g.peers, addr)
+	delete(g.nodes, addr)
 	g.mu.Unlock()
-	if err := p.sess.Close(); err != nil {
-		return err
-	}
 
 	g.log.Println("INFO: disconnected from peer", addr)
 	return nil
@@ -525,4 +519,21 @@ func (g *Gateway) Peers() []modules.Peer {
 		peers = append(peers, p.Peer)
 	}
 	return peers
+}
+
+// Online returns true if the node is connected to the internet. During testing
+// we always assume that the node is online
+func (g *Gateway) Online() bool {
+	if build.Release == "dev" || build.Release == "testing" {
+		return true
+	}
+
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, p := range g.peers {
+		if !p.Local {
+			return true
+		}
+	}
+	return false
 }

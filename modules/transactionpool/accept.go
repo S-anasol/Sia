@@ -17,10 +17,10 @@ import (
 )
 
 var (
-	errObjectConflict      = errors.New("transaction set conflicts with an existing transaction set")
+	errEmptySet            = errors.New("transaction set is empty")
 	errFullTransactionPool = errors.New("transaction pool cannot accept more transactions")
 	errLowMinerFees        = errors.New("transaction set needs more miner fees to be accepted")
-	errEmptySet            = errors.New("transaction set is empty")
+	errObjectConflict      = errors.New("transaction set conflicts with an existing transaction set")
 )
 
 // relatedObjectIDs determines all of the object ids related to a transaction.
@@ -317,9 +317,11 @@ func (tp *TransactionPool) acceptTransactionSet(ts []types.Transaction, txnFn fu
 	return nil
 }
 
-// AcceptTransaction adds a transaction to the unconfirmed set of
+// AcceptTransactionSet adds a transaction to the unconfirmed set of
 // transactions. If the transaction is accepted, it will be relayed to
 // connected peers.
+//
+// TODO: Break into component sets when the set gets accepted.
 func (tp *TransactionPool) AcceptTransactionSet(ts []types.Transaction) error {
 	// assert on consensus set to get special method
 	cs, ok := tp.consensusSet.(interface {
@@ -330,15 +332,18 @@ func (tp *TransactionPool) AcceptTransactionSet(ts []types.Transaction) error {
 	}
 
 	return cs.LockedTryTransactionSet(func(txnFn func(txns []types.Transaction) (modules.ConsensusChange, error)) error {
+		tp.log.Debugln("Beginning broadcast of transaction set")
 		tp.mu.Lock()
 		defer tp.mu.Unlock()
 		err := tp.acceptTransactionSet(ts, txnFn)
 		if err != nil {
+			tp.log.Debugln("Transaction set broadcast has failed:", err)
 			return err
 		}
 		go tp.gateway.Broadcast("RelayTransactionSet", ts, tp.gateway.Peers())
 		// Notify subscribers of an accepted transaction set
 		tp.updateSubscribersTransactions()
+		tp.log.Debugln("Transaction set broadcast appears to have succeeded")
 		return nil
 	})
 }

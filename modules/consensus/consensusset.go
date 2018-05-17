@@ -15,8 +15,8 @@ import (
 	"github.com/NebulousLabs/Sia/sync"
 	"github.com/NebulousLabs/Sia/types"
 
-	"github.com/NebulousLabs/bolt"
 	"github.com/NebulousLabs/demotemutex"
+	"github.com/coreos/bbolt"
 )
 
 var (
@@ -200,6 +200,21 @@ func (cs *ConsensusSet) BlockAtHeight(height types.BlockHeight) (block types.Blo
 		return nil
 	})
 	return block, exists
+}
+
+// BlockByID returns the block for a given BlockID.
+func (cs *ConsensusSet) BlockByID(id types.BlockID) (block types.Block, height types.BlockHeight, exists bool) {
+	_ = cs.db.View(func(tx *bolt.Tx) error {
+		pb, err := getBlockMap(tx, id)
+		if err != nil {
+			return err
+		}
+		block = pb.Block
+		height = pb.Height
+		exists = true
+		return nil
+	})
+	return block, height, exists
 }
 
 // ChildTarget returns the target for the child of a block.

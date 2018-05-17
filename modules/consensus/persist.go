@@ -10,7 +10,7 @@ import (
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/persist"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 const (
@@ -45,11 +45,6 @@ func (cs *ConsensusSet) loadDB() error {
 		err = cs.initOak(tx)
 		if err != nil {
 			return err
-		}
-
-		// Check that inconsistencies have not been detected in the database.
-		if inconsistencyDetected(tx) {
-			return errors.New("database contains inconsistencies")
 		}
 
 		// Check that the genesis block is correct - typically only incorrect

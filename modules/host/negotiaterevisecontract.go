@@ -1,6 +1,7 @@
 package host
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -37,11 +38,11 @@ func (h *Host) managedRevisionIteration(conn net.Conn, so *storageObligation, fi
 	}
 
 	// Read some variables from the host for use later in the function.
-	h.mu.RLock()
-	settings := h.settings
+	h.mu.Lock()
+	settings := h.externalSettings()
 	secretKey := h.secretKey
 	blockHeight := h.blockHeight
-	h.mu.RUnlock()
+	h.mu.Unlock()
 
 	// The renter is going to send its intended modifications, followed by the
 	// file contract revision that pays for them.
@@ -96,8 +97,8 @@ func (h *Host) managedRevisionIteration(conn net.Conn, so *storageObligation, fi
 				// Update finances.
 				blocksRemaining := so.proofDeadline() - blockHeight
 				blockBytesCurrency := types.NewCurrency64(uint64(blocksRemaining)).Mul64(modules.SectorSize)
-				bandwidthRevenue = bandwidthRevenue.Add(settings.MinUploadBandwidthPrice.Mul64(modules.SectorSize))
-				storageRevenue = storageRevenue.Add(settings.MinStoragePrice.Mul(blockBytesCurrency))
+				bandwidthRevenue = bandwidthRevenue.Add(settings.UploadBandwidthPrice.Mul64(modules.SectorSize))
+				storageRevenue = storageRevenue.Add(settings.StoragePrice.Mul(blockBytesCurrency))
 				newCollateral = newCollateral.Add(settings.Collateral.Mul(blockBytesCurrency))
 
 				// Insert the sector into the root list.
@@ -122,7 +123,7 @@ func (h *Host) managedRevisionIteration(conn net.Conn, so *storageObligation, fi
 				copy(sector[modification.Offset:], modification.Data)
 
 				// Update finances.
-				bandwidthRevenue = bandwidthRevenue.Add(settings.MinUploadBandwidthPrice.Mul64(uint64(len(modification.Data))))
+				bandwidthRevenue = bandwidthRevenue.Add(settings.UploadBandwidthPrice.Mul64(uint64(len(modification.Data))))
 
 				// Update the sectors removed and gained to indicate that the old
 				// sector has been replaced with a new sector.
@@ -202,7 +203,7 @@ func (h *Host) managedRPCReviseContract(conn net.Conn) error {
 	// will be used to pay for the data.
 	_, so, err := h.managedRPCRecentRevision(conn)
 	if err != nil {
-		return extendErr("RPCRecentRevision failed: ", err)
+		return extendErr("failed RPCRecentRevision during RPCReviseContract: ", err)
 	}
 	// The storage obligation is received with a lock on it. Defer a call to
 	// unlock the storage obligation.
@@ -239,6 +240,18 @@ func verifyRevision(so storageObligation, revision types.FileContractRevision, b
 	}
 
 	oldFCR := so.RevisionTransactionSet[len(so.RevisionTransactionSet)-1].FileContractRevisions[0]
+
+	// Host payout addresses shouldn't change
+	if revision.NewValidProofOutputs[1].UnlockHash != oldFCR.NewValidProofOutputs[1].UnlockHash {
+		return errors.New("host payout address changed")
+	}
+	if revision.NewMissedProofOutputs[1].UnlockHash != oldFCR.NewMissedProofOutputs[1].UnlockHash {
+		return errors.New("host payout address changed")
+	}
+	// Make sure the lost collateral still goes to the void
+	if revision.NewMissedProofOutputs[2].UnlockHash != oldFCR.NewMissedProofOutputs[2].UnlockHash {
+		return errors.New("lost collateral address was changed")
+	}
 
 	// Check that all non-volatile fields are the same.
 	if oldFCR.ParentID != revision.ParentID {

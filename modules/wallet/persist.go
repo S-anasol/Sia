@@ -13,13 +13,13 @@ import (
 	"github.com/NebulousLabs/Sia/types"
 	"github.com/NebulousLabs/fastrand"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 const (
-	logFile    = modules.WalletDir + ".log"
-	dbFile     = modules.WalletDir + ".db"
 	compatFile = modules.WalletDir + ".json"
+	dbFile     = modules.WalletDir + ".db"
+	logFile    = modules.WalletDir + ".log"
 )
 
 var (
@@ -44,6 +44,9 @@ func (w *Wallet) openDB(filename string) (err error) {
 	}
 	// initialize the database
 	err = w.db.Update(func(tx *bolt.Tx) error {
+		// check whether we need to init bucketAddrTransactions
+		buildAddrTxns := tx.Bucket(bucketAddrTransactions) == nil
+		// ensure that all buckets exist
 		for _, b := range dbBuckets {
 			_, err := tx.CreateBucketIfNotExists(b)
 			if err != nil {
@@ -69,6 +72,17 @@ func (w *Wallet) openDB(filename string) (err error) {
 		}
 		if wb.Get(keySiafundPool) == nil {
 			wb.Put(keySiafundPool, encoding.Marshal(types.ZeroCurrency))
+		}
+
+		// build the bucketAddrTransactions bucket if necessary
+		if buildAddrTxns {
+			it := dbProcessedTransactionsIterator(tx)
+			for it.next() {
+				index, pt := it.key(), it.value()
+				if err := dbAddProcessedTransactionAddrs(tx, pt, index); err != nil {
+					return err
+				}
+			}
 		}
 
 		// check whether wallet is encrypted
@@ -109,9 +123,7 @@ func (w *Wallet) initPersist() error {
 	if err != nil {
 		return err
 	}
-	w.tg.AfterStop(func() { w.db.Close() })
-
-	return nil
+	return w.tg.AfterStop(func() error { return w.db.Close() })
 }
 
 // createBackup copies the wallet database to dst.

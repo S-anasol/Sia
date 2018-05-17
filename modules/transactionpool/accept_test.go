@@ -11,6 +11,9 @@ import (
 // TestAcceptTransactionSet probes the AcceptTransactionSet method
 // of the transaction pool.
 func TestAcceptTransactionSet(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
 	// Create a transaction pool tester.
 	tpt, err := createTpoolTester(t.Name())
 	if err != nil {
@@ -71,7 +74,10 @@ func TestConflictingTransactionSets(t *testing.T) {
 
 	// Fund a partial transaction.
 	fund := types.NewCurrency64(30e6)
-	txnBuilder := tpt.wallet.StartTransaction()
+	txnBuilder, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = txnBuilder.FundSiacoins(fund)
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +338,10 @@ func TestTransactionSuperset(t *testing.T) {
 
 	// Fund a partial transaction.
 	fund := types.NewCurrency64(30e6)
-	txnBuilder := tpt.wallet.StartTransaction()
+	txnBuilder, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = txnBuilder.FundSiacoins(fund)
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +400,10 @@ func TestTransactionSubset(t *testing.T) {
 
 	// Fund a partial transaction.
 	fund := types.NewCurrency64(30e6)
-	txnBuilder := tpt.wallet.StartTransaction()
+	txnBuilder, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = txnBuilder.FundSiacoins(fund)
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +450,10 @@ func TestTransactionChild(t *testing.T) {
 
 	// Fund a partial transaction.
 	fund := types.NewCurrency64(30e6)
-	txnBuilder := tpt.wallet.StartTransaction()
+	txnBuilder, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = txnBuilder.FundSiacoins(fund)
 	if err != nil {
 		t.Fatal(err)
@@ -507,7 +522,10 @@ func TestAcceptFCAndConflictingRevision(t *testing.T) {
 	defer tpt.Close()
 
 	// Create and fund a valid file contract.
-	builder := tpt.wallet.StartTransaction()
+	builder, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	payout := types.NewCurrency64(1e9)
 	err = builder.FundSiacoins(payout)
 	if err != nil {
@@ -563,7 +581,10 @@ func TestPartialConfirmation(t *testing.T) {
 	defer tpt.Close()
 
 	// Create and fund a valid file contract.
-	builder := tpt.wallet.StartTransaction()
+	builder, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	payout := types.NewCurrency64(1e9)
 	err = builder.FundSiacoins(payout)
 	if err != nil {
@@ -641,7 +662,10 @@ func TestPartialConfirmationWeave(t *testing.T) {
 
 	// Create a transaction with a single output to a fully controlled address.
 	emptyUH := types.UnlockConditions{}.UnlockHash()
-	builder1 := tpt.wallet.StartTransaction()
+	builder1, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	funding1 := types.NewCurrency64(1e9)
 	err = builder1.FundSiacoins(funding1)
 	if err != nil {
@@ -669,7 +693,10 @@ func TestPartialConfirmationWeave(t *testing.T) {
 
 	// Create a second output to the fully controlled address, to fund the
 	// second transaction in the weave.
-	builder2 := tpt.wallet.StartTransaction()
+	builder2, err := tpt.wallet.StartTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
 	funding2 := types.NewCurrency64(2e9)
 	err = builder2.FundSiacoins(funding2)
 	if err != nil {

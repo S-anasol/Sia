@@ -7,7 +7,6 @@ package types
 
 import (
 	"errors"
-	"io"
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
@@ -15,6 +14,7 @@ import (
 )
 
 const (
+	// SpecifierLen is the length in bytes of a Specifier.
 	SpecifierLen = 16
 
 	// UnlockHashChecksumSize is the size of the checksum used to verify
@@ -28,19 +28,19 @@ const (
 // These Specifiers are used internally when calculating a type's ID. See
 // Specifier for more details.
 var (
+	ErrTransactionIDWrongLen = errors.New("input has wrong length to be an encoded transaction id")
+
+	SpecifierClaimOutput          = Specifier{'c', 'l', 'a', 'i', 'm', ' ', 'o', 'u', 't', 'p', 'u', 't'}
+	SpecifierFileContract         = Specifier{'f', 'i', 'l', 'e', ' ', 'c', 'o', 'n', 't', 'r', 'a', 'c', 't'}
+	SpecifierFileContractRevision = Specifier{'f', 'i', 'l', 'e', ' ', 'c', 'o', 'n', 't', 'r', 'a', 'c', 't', ' ', 'r', 'e'}
+	SpecifierMinerFee             = Specifier{'m', 'i', 'n', 'e', 'r', ' ', 'f', 'e', 'e'}
 	SpecifierMinerPayout          = Specifier{'m', 'i', 'n', 'e', 'r', ' ', 'p', 'a', 'y', 'o', 'u', 't'}
 	SpecifierSiacoinInput         = Specifier{'s', 'i', 'a', 'c', 'o', 'i', 'n', ' ', 'i', 'n', 'p', 'u', 't'}
 	SpecifierSiacoinOutput        = Specifier{'s', 'i', 'a', 'c', 'o', 'i', 'n', ' ', 'o', 'u', 't', 'p', 'u', 't'}
-	SpecifierFileContract         = Specifier{'f', 'i', 'l', 'e', ' ', 'c', 'o', 'n', 't', 'r', 'a', 'c', 't'}
-	SpecifierFileContractRevision = Specifier{'f', 'i', 'l', 'e', ' ', 'c', 'o', 'n', 't', 'r', 'a', 'c', 't', ' ', 'r', 'e'}
-	SpecifierStorageProof         = Specifier{'s', 't', 'o', 'r', 'a', 'g', 'e', ' ', 'p', 'r', 'o', 'o', 'f'}
-	SpecifierStorageProofOutput   = Specifier{'s', 't', 'o', 'r', 'a', 'g', 'e', ' ', 'p', 'r', 'o', 'o', 'f'}
 	SpecifierSiafundInput         = Specifier{'s', 'i', 'a', 'f', 'u', 'n', 'd', ' ', 'i', 'n', 'p', 'u', 't'}
 	SpecifierSiafundOutput        = Specifier{'s', 'i', 'a', 'f', 'u', 'n', 'd', ' ', 'o', 'u', 't', 'p', 'u', 't'}
-	SpecifierClaimOutput          = Specifier{'c', 'l', 'a', 'i', 'm', ' ', 'o', 'u', 't', 'p', 'u', 't'}
-	SpecifierMinerFee             = Specifier{'m', 'i', 'n', 'e', 'r', ' ', 'f', 'e', 'e'}
-
-	ErrTransactionIDWrongLen = errors.New("input has wrong length to be an encoded transaction id")
+	SpecifierStorageProof         = Specifier{'s', 't', 'o', 'r', 'a', 'g', 'e', ' ', 'p', 'r', 'o', 'o', 'f'}
+	SpecifierStorageProofOutput   = Specifier{'s', 't', 'o', 'r', 'a', 'g', 'e', ' ', 'p', 'r', 'o', 'o', 'f'}
 )
 
 type (
@@ -60,11 +60,17 @@ type (
 	// are constructed by hashing specific fields of the type, along with a
 	// Specifier. While all of these types are hashes, defining type aliases
 	// gives us type safety and makes the code more readable.
-	TransactionID   crypto.Hash
+
+	// TransactionID uniquely identifies a transaction
+	TransactionID crypto.Hash
+	// SiacoinOutputID uniquely identifies a siacoin output
 	SiacoinOutputID crypto.Hash
+	// SiafundOutputID uniquely identifies a siafund output
 	SiafundOutputID crypto.Hash
-	FileContractID  crypto.Hash
-	OutputID        crypto.Hash
+	// FileContractID uniquely identifies a file contract
+	FileContractID crypto.Hash
+	// OutputID uniquely identifies an output
+	OutputID crypto.Hash
 
 	// A Transaction is an atomic component of a block. Transactions can contain
 	// inputs and outputs, file contracts, storage proofs, and even arbitrary
@@ -124,8 +130,8 @@ type (
 	//
 	// When the SiafundOutput is spent, a SiacoinOutput is created, where:
 	//
-	//     SiacoinOutput.Value := (SiafundPool - ClaimStart) / 10,000
-	//     SiacoinOutput.UnlockHash := SiafundOutput.ClaimUnlockHash
+	//     SiacoinOutput.Value := (SiafundPool - ClaimStart) / 10,000 * Value
+	//     SiacoinOutput.UnlockHash := SiafundInput.ClaimUnlockHash
 	//
 	// When a SiafundOutput is put into a transaction, the ClaimStart must always
 	// equal zero. While the transaction is being processed, the ClaimStart is set
@@ -142,47 +148,6 @@ type (
 	// UnlockHash is constructed.
 	UnlockHash crypto.Hash
 )
-
-func (t Transaction) marshalSiaNoSignatures(w io.Writer) {
-	enc := encoding.NewEncoder(w)
-
-	encoding.WriteInt(w, len((t.SiacoinInputs)))
-	for i := range t.SiacoinInputs {
-		t.SiacoinInputs[i].MarshalSia(w)
-	}
-	encoding.WriteInt(w, len((t.SiacoinOutputs)))
-	for i := range t.SiacoinOutputs {
-		t.SiacoinOutputs[i].MarshalSia(w)
-	}
-	encoding.WriteInt(w, len((t.FileContracts)))
-	for i := range t.FileContracts {
-		enc.Encode(t.FileContracts[i])
-	}
-	encoding.WriteInt(w, len((t.FileContractRevisions)))
-	for i := range t.FileContractRevisions {
-		enc.Encode(t.FileContractRevisions[i])
-	}
-	encoding.WriteInt(w, len((t.StorageProofs)))
-	for i := range t.StorageProofs {
-		enc.Encode(t.StorageProofs[i])
-	}
-	encoding.WriteInt(w, len((t.SiafundInputs)))
-	for i := range t.SiafundInputs {
-		enc.Encode(t.SiafundInputs[i])
-	}
-	encoding.WriteInt(w, len((t.SiafundOutputs)))
-	for i := range t.SiafundOutputs {
-		t.SiafundOutputs[i].MarshalSia(w)
-	}
-	encoding.WriteInt(w, len((t.MinerFees)))
-	for i := range t.MinerFees {
-		t.MinerFees[i].MarshalSia(w)
-	}
-	encoding.WriteInt(w, len((t.ArbitraryData)))
-	for i := range t.ArbitraryData {
-		encoding.WritePrefix(w, t.ArbitraryData[i])
-	}
-}
 
 // ID returns the id of a transaction, which is taken by marshalling all of the
 // fields except for the signatures and taking the hash of the result.

@@ -15,10 +15,13 @@
 * [Contact us](#contact)
 
 <a name="go"/>
+
 ## Get started with Go
 
 <a name="install-go"/>
+
 ### Install Go
+
 To install Go on your computer, follow the 
 [official installation guide][install-go].  
 
@@ -26,28 +29,19 @@ You should install the latest [official Go binary][binary] for your system (if
 not available, [install from source][source]).  If you plan to cross compile 
 Sia, see [Cross Compilation with Go 1.5][cross] by Dave Cheney.  
 
-Now make a workspace directory in which you will store source code and 
-dependencies.  You can choose any filepath except where you installed Go (don't 
-choose `/usr/local`).
-
-```bash
-# make a working directory called golang in your home directory
-$ mkdir $HOME/golang
-# store base path in an environmental variable
-$ echo 'export GOPATH=$HOME/golang' >> $HOME/.profile
-# add bin subdirectory to PATH environmental variable
-$ echo 'export PATH=$PATH:$GOPATH/bin' >> $HOME/.profile
-```
-
 <a name="learn-go"/>
+
 ### Learn Go
+
 * To get familiar with the language, start with the official [Tour of Go][tour].
 * Move onto [How to Write Go Code][how] to learn how to organize Go packages 
 and use the go tool.
 * Finish with the [Effective Go][effective] guide.
 
 <a name="build-sia"/>
+
 ## Build Sia
+
 To build Sia on your machine, enter the following on the command line:
 
 ```bash
@@ -60,19 +54,29 @@ $ cd $GOPATH/src/github.com/NebulousLabs/Sia
 
 # You have three Sia builds to choose from.
 # To build the standard release binary:
-$ make release-std
+$ make release
 # Or to build the release binary with race detection and an array debugging 
 # asserts:
-$ make release
+$ make release-race
 # Or to build the developer binary (with a different genesis block, faster 
 # block times, and other changes):
-$ make
+$ make dev
+# Or build the developer binary with race detection:
+$ make dev-race
+# Build the debugger binary:
+$ make debug
+# Or build debugger binary with race detection:
+$ make debug-race
 ```
 
 <a name="contribute"/>
+
 ## Contribute to the codebase
+
 <a name="setup-git"/>
+
 ### Set up git
+
 Install git on your machine according to [these instructions][install-git] in 
 the Pro Git book.
 
@@ -89,7 +93,9 @@ $ git config --global credential.helper "cache --timeout=[seconds]"
 
 ```
 <a name="fork"/>
+
 ### Fork the Sia repository
+
 While logged into your Github account, navigate to the [Sia repository][sia] 
 and click the 'Fork' button in the upper righthand corner.  Your account now 
 has a 'forked' copy of the original repo at 
@@ -104,10 +110,14 @@ $ cd $GOPATH/src/github.com/NebulousLabs/Sia
 # Add your fork as a remote.  Name it whatever is convenient,
 # e.g your GitHub username
 $ git remote add <remote name> https://github.com/<username>/Sia.git
+# Or if you use an SSH key, create the remote with the following
+$ git remote add <remote name> git@github.com:<username>/Sia.git
 ```
 
-<a name="write">
+<a name="write"/>
+
 ### Write some code
+
 Right now your git local repository only has one branch (called 'master' by 
 default). If you want to make changes, add a new branch and make your changes 
 there. You should maintain master as an up-to-date copy of the NebulousLabs/Sia 
@@ -116,7 +126,7 @@ repository's master branch.
 To create and checkout a new branch:
 ```bash
 # If you're not already in the right directory:
-$ cd $GOPATH/src/NebulousLabs/Sia
+$ cd $GOPATH/src/github.com/NebulousLabs/Sia
 # Make sure you're on branch master
 $ git checkout master
 # Create and checkout a new branch
@@ -181,7 +191,9 @@ $ git commit -m "Add new tests for CommitSync method"
 $ git push <fork remote> <branch>
 ```
 <a name="pull"/>
+
 ### Submit your code for review
+
 Once you've tested your new code and pushed changes to your fork, navigate to 
 your fork at `https://github.com/<username>/Sia` in your browser.  
 Switch to the branch you've made changes on by selecting it from the list on 
@@ -214,18 +226,24 @@ $ git push <fork remote> :<branch>
 $ git push <fork remote> master
 ```
 <a name="git-resources"/>
+
 ### More Git resources
+
   * [How to into git (and Github)][luke] by Luke Champine
   * [Official resources for learning Git][git]
 
 <a name="where-to-start"/>
+
 ## Where to start
+
 If you'd like to contribute to Sia but don't have any specific ideas, writing 
-tests is a good way to get your feet wet.  See [doc/Running and Writing Tests for Sia.md](Running\ and\ Writing\ Tests\ for\ Sia.md) to get started. 
+tests is a good way to get your feet wet.  See [doc/Running and Writing Tests for Sia.md](Running%20and%20Writing%20Tests%20for%20Sia.md) to get started.
 
 <a name="contact"/>
+
 ## Contact us
-Feel free to ask for help on the #dev channel on [Slack][slack].
+
+Feel free to ask for help on the #core-dev channel on [discord][discord].
 
 [cross]: http://dave.cheney.net/2015/08/22/cross-compilation-with-go-1-5
 [binary]: https://golang.org/dl/
@@ -243,7 +261,7 @@ Feel free to ask for help on the #dev channel on [Slack][slack].
 [developers.md]: https://github.com/NebulousLabs/Sia/blob/master/doc/Developers.md
 [gofmt]: https://golang.org/cmd/gofmt/
 [nutshell]: https://git-scm.com/book/en/v2/Git-Branching-Branches-in-a-Nutshell
-[slack]: http://slackin.siacoin.com
+[discord]: https://discord.gg/sia
 [install-git]: https://git-scm.com/book/en/v2/Getting-Started-Installing-Git
 [test-doc]: https://github.com/NebulousLabs/Sia/blob/master/doc/Testing.md
 [stashing]: https://git-scm.com/book/en/v2/Git-Tools-Stashing-and-Cleaning

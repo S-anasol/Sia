@@ -1,264 +1,145 @@
 package renter
 
-// TODO: Need to make sure that we do not end up with two workers for the same
-// host, which could potentially happen over renewals because the contract ids
-// will be different.
-
 import (
+	"sync"
 	"time"
 
-	"github.com/NebulousLabs/Sia/crypto"
+	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 )
 
-type (
-	// downloadWork contains instructions to download a piece from a host, and
-	// a channel for returning the results.
-	downloadWork struct {
-		// dataRoot is the MerkleRoot of the data being requested, which serves
-		// as an ID when requesting data from the host.
-		dataRoot   crypto.Hash
-		pieceIndex uint64
+// A worker listens for work on a certain host.
+//
+// The mutex of the worker only protects the 'unprocessedChunks' and the
+// 'standbyChunks' fields of the worker. The rest of the fields are only
+// interacted with exclusively by the primary worker thread, and only one of
+// those ever exists at a time.
+//
+// The workers have a concept of 'cooldown' for uploads and downloads. If a
+// download or upload operation fails, the assumption is that future attempts
+// are also likely to fail, because whatever condition resulted in the failure
+// will still be present until some time has passed. Without any cooldowns,
+// uploading and downloading with flaky hosts in the worker sets has
+// substantially reduced overall performance and throughput.
+type worker struct {
+	// The contract and host used by this worker.
+	contract   modules.RenterContract
+	hostPubKey types.SiaPublicKey
+	renter     *Renter
 
-		chunkDownload *chunkDownload
+	// Download variables that are not protected by a mutex, but also do not
+	// need to be protected by a mutex, as they are only accessed by the master
+	// thread for the worker.
+	ownedDownloadConsecutiveFailures int       // How many failures in a row?
+	ownedDownloadRecentFailure       time.Time // How recent was the last failure?
 
-		// resultChan is a channel that the worker will use to return the
-		// results of the download.
-		resultChan chan finishedDownload
-	}
+	// Download variables related to queuing work. They have a separate mutex to
+	// minimize lock contention.
+	downloadChan       chan struct{}              // Notifications of new work. Takes priority over uploads.
+	downloadChunks     []*unfinishedDownloadChunk // Yet unprocessed work items.
+	downloadMu         sync.Mutex
+	downloadTerminated bool // Has downloading been terminated for this worker?
 
-	// finishedDownload contains the data and error from performing a download.
-	finishedDownload struct {
-		chunkDownload *chunkDownload
-		data          []byte
-		err           error
-		pieceIndex    uint64
-		workerID      types.FileContractID
-	}
+	// Upload variables.
+	unprocessedChunks         []*unfinishedUploadChunk // Yet unprocessed work items.
+	uploadChan                chan struct{}            // Notifications of new work.
+	uploadConsecutiveFailures int                      // How many times in a row uploading has failed.
+	uploadRecentFailure       time.Time                // How recent was the last failure?
+	uploadTerminated          bool                     // Have we stopped uploading?
 
-	// finishedUpload contains the Merkle root and error from performing an
-	// upload.
-	finishedUpload struct {
-		chunkID    chunkID
-		dataRoot   crypto.Hash
-		err        error
-		pieceIndex uint64
-		workerID   types.FileContractID
-	}
-
-	// uploadWork contains instructions to upload a piece to a host, and a
-	// channel for returning the results.
-	uploadWork struct {
-		// data is the payload of the upload.
-		chunkID    chunkID
-		data       []byte
-		file       *file
-		pieceIndex uint64
-
-		// resultChan is a channel that the worker will use to return the
-		// results of the upload.
-		resultChan chan finishedUpload
-	}
-
-	// A worker listens for work on a certain host.
-	worker struct {
-		// contractID specifies which contract the worker specifically works
-		// with.
-		contractID types.FileContractID
-
-		// If there is work on all three channels, the worker will first do all
-		// of the work in the download chan, then all of the work in the
-		// priority upload chan, and finally all of the work in the upload
-		// chan.
-		//
-		// A busy higher priority channel is able to entirely starve all of the
-		// channels with lower priority.
-		downloadChan         chan downloadWork // higher priority than all uploads
-		killChan             chan struct{}     // highest priority
-		priorityDownloadChan chan downloadWork // higher priority than downloads (used for user-initiated downloads)
-		uploadChan           chan uploadWork   // lowest priority
-
-		// recentUploadFailure documents the most recent time that an upload
-		// has failed.
-		consecutiveUploadFailures time.Duration
-		recentUploadFailure       time.Time // Only modified by primary repair loop.
-
-		// recentDownloadFailure documents the most recent time that a download
-		// has failed.
-		recentDownloadFailure time.Time // Only modified by the primary download loop.
-
-		// Utilities.
-		renter *Renter
-	}
-)
-
-// download will perform some download work.
-func (w *worker) download(dw downloadWork) {
-	d, err := w.renter.hostContractor.Downloader(w.contractID, w.renter.tg.StopChan())
-	if err != nil {
-		select {
-		case dw.resultChan <- finishedDownload{dw.chunkDownload, nil, err, dw.pieceIndex, w.contractID}:
-		case <-w.renter.tg.StopChan():
-		}
-		return
-	}
-	defer d.Close()
-
-	data, err := d.Sector(dw.dataRoot)
-	select {
-	case dw.resultChan <- finishedDownload{dw.chunkDownload, data, err, dw.pieceIndex, w.contractID}:
-	case <-w.renter.tg.StopChan():
-	}
-}
-
-// upload will perform some upload work.
-func (w *worker) upload(uw uploadWork) {
-	e, err := w.renter.hostContractor.Editor(w.contractID, w.renter.tg.StopChan())
-	if err != nil {
-		w.recentUploadFailure = time.Now()
-		w.consecutiveUploadFailures++
-		select {
-		case uw.resultChan <- finishedUpload{uw.chunkID, crypto.Hash{}, err, uw.pieceIndex, w.contractID}:
-		case <-w.renter.tg.StopChan():
-		}
-		return
-	}
-	defer e.Close()
-
-	root, err := e.Upload(uw.data)
-	if err != nil {
-		w.recentUploadFailure = time.Now()
-		w.consecutiveUploadFailures++
-		select {
-		case uw.resultChan <- finishedUpload{uw.chunkID, root, err, uw.pieceIndex, w.contractID}:
-		case <-w.renter.tg.StopChan():
-		}
-		return
-	}
-
-	// Success - reset the consecutive upload failures count.
-	w.consecutiveUploadFailures = 0
-
-	// Update the renter metadata.
-	id := w.renter.mu.Lock()
-	uw.file.mu.Lock()
-	contract, exists := uw.file.contracts[w.contractID]
-	if !exists {
-		contract = fileContract{
-			ID:          w.contractID,
-			IP:          e.Address(),
-			WindowStart: e.EndHeight(),
-		}
-	}
-	contract.Pieces = append(contract.Pieces, pieceData{
-		Chunk:      uw.chunkID.index,
-		Piece:      uw.pieceIndex,
-		MerkleRoot: root,
-	})
-	uw.file.contracts[w.contractID] = contract
-	w.renter.saveFile(uw.file)
-	uw.file.mu.Unlock()
-	w.renter.mu.Unlock(id)
-
-	select {
-	case uw.resultChan <- finishedUpload{uw.chunkID, root, err, uw.pieceIndex, w.contractID}:
-	case <-w.renter.tg.StopChan():
-	}
-}
-
-// work will perform one unit of work, exiting early if there is a kill signal
-// given before work is completed.
-func (w *worker) work() {
-	// Check for priority downloads.
-	select {
-	case d := <-w.priorityDownloadChan:
-		w.download(d)
-		return
-	default:
-		// do nothing
-	}
-
-	// Check for standard downloads.
-	select {
-	case d := <-w.downloadChan:
-		w.download(d)
-		return
-	default:
-		// do nothing
-	}
-
-	// None of the priority channels have work, listen on all channels.
-	select {
-	case d := <-w.downloadChan:
-		w.download(d)
-		return
-	case <-w.killChan:
-		return
-	case d := <-w.priorityDownloadChan:
-		w.download(d)
-		return
-	case u := <-w.uploadChan:
-		w.upload(u)
-		return
-	case <-w.renter.tg.StopChan():
-		return
-	}
-}
-
-// threadedWorkLoop repeatedly issues work to a worker, stopping when the
-// thread group is closed.
-func (w *worker) threadedWorkLoop() {
-	for {
-		// Check if the worker has been killed individually.
-		select {
-		case <-w.killChan:
-			return
-		default:
-			// do nothing
-		}
-
-		if w.renter.tg.Add() != nil {
-			return
-		}
-		w.work()
-		w.renter.tg.Done()
-	}
+	// Utilities.
+	//
+	// The mutex is only needed when interacting with 'downloadChunks' and
+	// 'unprocessedChunks', as everything else is only accessed from the single
+	// master thread.
+	killChan chan struct{} // Worker will shut down if a signal is sent down this channel.
+	mu       sync.Mutex
 }
 
 // updateWorkerPool will grab the set of contracts from the contractor and
 // update the worker pool to match.
-func (r *Renter) updateWorkerPool() {
-	// Get a map of all the contracts in the contractor.
-	newContracts := make(map[types.FileContractID]struct{})
-	for _, nc := range r.hostContractor.Contracts() {
-		newContracts[nc.ID] = struct{}{}
+func (r *Renter) managedUpdateWorkerPool() {
+	contractSlice := r.hostContractor.Contracts()
+	contractMap := make(map[types.FileContractID]modules.RenterContract)
+	for i := 0; i < len(contractSlice); i++ {
+		contractMap[contractSlice[i].ID] = contractSlice[i]
 	}
 
 	// Add a worker for any contract that does not already have a worker.
-	for id := range newContracts {
+	for id, contract := range contractMap {
+		lockID := r.mu.Lock()
 		_, exists := r.workerPool[id]
 		if !exists {
 			worker := &worker{
-				contractID: id,
+				contract:   contract,
+				hostPubKey: contract.HostPublicKey,
 
-				downloadChan:         make(chan downloadWork, 1),
-				killChan:             make(chan struct{}),
-				priorityDownloadChan: make(chan downloadWork, 1),
-				uploadChan:           make(chan uploadWork, 1),
+				downloadChan: make(chan struct{}, 1),
+				killChan:     make(chan struct{}),
+				uploadChan:   make(chan struct{}, 1),
 
 				renter: r,
 			}
 			r.workerPool[id] = worker
 			go worker.threadedWorkLoop()
 		}
+		r.mu.Unlock(lockID)
 	}
 
 	// Remove a worker for any worker that is not in the set of new contracts.
+	lockID := r.mu.Lock()
 	for id, worker := range r.workerPool {
-		_, exists := newContracts[id]
+		_, exists := contractMap[id]
 		if !exists {
 			delete(r.workerPool, id)
 			close(worker.killChan)
+		}
+	}
+	r.mu.Unlock(lockID)
+}
+
+// threadedWorkLoop repeatedly issues work to a worker, stopping when the worker
+// is killed or when the thread group is closed.
+func (w *worker) threadedWorkLoop() {
+	err := w.renter.tg.Add()
+	if err != nil {
+		return
+	}
+	defer w.renter.tg.Done()
+	defer w.managedKillUploading()
+	defer w.managedKillDownloading()
+
+	for {
+		// Perform one stpe of processing download work.
+		downloadChunk := w.managedNextDownloadChunk()
+		if downloadChunk != nil {
+			// managedDownload will handle removing the worker internally. If
+			// the chunk is dropped from the worker, the worker will be removed
+			// from the chunk. If the worker executes a download (success or
+			// failure), the worker will be removed from the chunk. If the
+			// worker is put on standby, it will not be removed from the chunk.
+			w.managedDownload(downloadChunk)
+			continue
+		}
+
+		// Perform one step of processing upload work.
+		chunk, pieceIndex := w.managedNextUploadChunk()
+		if chunk != nil {
+			w.managedUpload(chunk, pieceIndex)
+			continue
+		}
+
+		// Block until new work is received via the upload or download channels,
+		// or until a kill or stop signal is received.
+		select {
+		case <-w.downloadChan:
+			continue
+		case <-w.uploadChan:
+			continue
+		case <-w.killChan:
+			return
+		case <-w.renter.tg.StopChan():
+			return
 		}
 	}
 }

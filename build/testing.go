@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 var (
@@ -61,6 +62,9 @@ func CopyDir(source, dest string) error {
 		return err
 	}
 	files, err := ioutil.ReadDir(source)
+	if err != nil {
+		return err
+	}
 	for _, file := range files {
 		newSource := filepath.Join(source, file.Name())
 		newDest := filepath.Join(dest, file.Name())
@@ -131,4 +135,19 @@ func ExtractTarGz(filename, dir string) error {
 			}
 		}
 	}
+}
+
+// Retry will call 'fn' 'tries' times, waiting 'durationBetweenAttempts'
+// between each attempt, returning 'nil' the first time that 'fn' returns nil.
+// If 'nil' is never returned, then the final error returned by 'fn' is
+// returned.
+func Retry(tries int, durationBetweenAttempts time.Duration, fn func() error) (err error) {
+	for i := 1; i < tries; i++ {
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(durationBetweenAttempts)
+	}
+	return fn()
 }

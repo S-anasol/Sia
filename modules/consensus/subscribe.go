@@ -4,7 +4,8 @@ import (
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/modules"
 
-	"github.com/NebulousLabs/bolt"
+	siasync "github.com/NebulousLabs/Sia/sync"
+	"github.com/coreos/bbolt"
 )
 
 // computeConsensusChange computes the consensus change from the change entry
@@ -95,9 +96,12 @@ func (cs *ConsensusSet) computeConsensusChange(tx *bolt.Tx, ce changeEntry) (mod
 }
 
 // readLockUpdateSubscribers will inform all subscribers of a new update to the
-// consensus set. readlockUpdateSubscribers does not alter the changelog, the
-// changelog must be updated beforehand.
-func (cs *ConsensusSet) readlockUpdateSubscribers(ce changeEntry) {
+// consensus set. updateSubscribers does not alter the changelog, the changelog
+// must be updated beforehand.
+func (cs *ConsensusSet) updateSubscribers(ce changeEntry) {
+	if len(cs.subscribers) == 0 {
+		return
+	}
 	// Get the consensus change and send it to all subscribers.
 	var cc modules.ConsensusChange
 	err := cs.db.View(func(tx *bolt.Tx) error {
@@ -120,7 +124,9 @@ func (cs *ConsensusSet) readlockUpdateSubscribers(ce changeEntry) {
 //
 // As a special case, using an empty id as the start will have all the changes
 // sent to the modules starting with the genesis block.
-func (cs *ConsensusSet) managedInitializeSubscribe(subscriber modules.ConsensusSetSubscriber, start modules.ConsensusChangeID) error {
+func (cs *ConsensusSet) managedInitializeSubscribe(subscriber modules.ConsensusSetSubscriber, start modules.ConsensusChangeID,
+	cancel <-chan struct{}) error {
+
 	if start == modules.ConsensusChangeRecent {
 		return nil
 	}
@@ -169,6 +175,11 @@ func (cs *ConsensusSet) managedInitializeSubscribe(subscriber modules.ConsensusS
 		cs.mu.RLock()
 		err = cs.db.View(func(tx *bolt.Tx) error {
 			for i := 0; i < 100 && exists; i++ {
+				select {
+				case <-cancel:
+					return siasync.ErrStopped
+				default:
+				}
 				cc, err := cs.computeConsensusChange(tx, entry)
 				if err != nil {
 					return err
@@ -192,7 +203,9 @@ func (cs *ConsensusSet) managedInitializeSubscribe(subscriber modules.ConsensusS
 //
 // As a special case, using an empty id as the start will have all the changes
 // sent to the modules starting with the genesis block.
-func (cs *ConsensusSet) ConsensusSetSubscribe(subscriber modules.ConsensusSetSubscriber, start modules.ConsensusChangeID) error {
+func (cs *ConsensusSet) ConsensusSetSubscribe(subscriber modules.ConsensusSetSubscriber, start modules.ConsensusChangeID,
+	cancel <-chan struct{}) error {
+
 	err := cs.tg.Add()
 	if err != nil {
 		return err
@@ -200,14 +213,14 @@ func (cs *ConsensusSet) ConsensusSetSubscribe(subscriber modules.ConsensusSetSub
 	defer cs.tg.Done()
 
 	// Get the input module caught up to the current consensus set.
-	err = cs.managedInitializeSubscribe(subscriber, start)
+	err = cs.managedInitializeSubscribe(subscriber, start, cancel)
 	if err != nil {
 		return err
 	}
 
 	// Add the module to the list of subscribers.
 	cs.mu.Lock()
-	// Check that this subscriber is not already subscribed.
+	// Sanity check - subscriber should not be already subscribed.
 	for _, s := range cs.subscribers {
 		if s == subscriber {
 			build.Critical("refusing to double-subscribe subscriber")
@@ -233,6 +246,10 @@ func (cs *ConsensusSet) Unsubscribe(subscriber modules.ConsensusSetSubscriber) {
 	// found.
 	for i := range cs.subscribers {
 		if cs.subscribers[i] == subscriber {
+			// nil the subscriber entry (otherwise it will not be GC'd if it's
+			// at the end of the subscribers slice).
+			cs.subscribers[i] = nil
+			// Delete the entry from the slice.
 			cs.subscribers = append(cs.subscribers[0:i], cs.subscribers[i+1:]...)
 			break
 		}

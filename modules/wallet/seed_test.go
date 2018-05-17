@@ -91,7 +91,7 @@ func TestLoadSeed(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester(t.Name())
+	wt, err := createWalletTester(t.Name(), modules.ProdDependencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,10 @@ func TestLoadSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Balance of wallet should be 0.
-	siacoinBal, _, _ := w.ConfirmedBalance()
+	siacoinBal, _, _, err := w.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !siacoinBal.Equals64(0) {
 		t.Error("fresh wallet should not have a balance")
 	}
@@ -147,7 +150,10 @@ func TestLoadSeed(t *testing.T) {
 		t.Error("AllSeeds returned the wrong seed")
 	}
 
-	siacoinBal2, _, _ := w.ConfirmedBalance()
+	siacoinBal2, _, _, err := w.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if siacoinBal2.Cmp64(0) <= 0 {
 		t.Error("wallet failed to load a seed with money in it")
 	}
@@ -174,7 +180,7 @@ func TestSweepSeedCoins(t *testing.T) {
 	}
 	t.Parallel()
 	// create a wallet with some money
-	wt, err := createWalletTester("TestSweepSeedCoins0")
+	wt, err := createWalletTester("TestSweepSeedCoins0", modules.ProdDependencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +199,10 @@ func TestSweepSeedCoins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wt.miner.AddBlock()
+	_, err = wt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// create a blank wallet
 	dir := filepath.Join(build.TempDir(modules.WalletDir, "TestSweepSeedCoins1"), modules.WalletDir)
@@ -210,7 +219,10 @@ func TestSweepSeedCoins(t *testing.T) {
 		t.Fatal(err)
 	}
 	// starting balance should be 0.
-	siacoinBal, _, _ := w.ConfirmedBalance()
+	siacoinBal, _, _, err := w.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !siacoinBal.IsZero() {
 		t.Error("fresh wallet should not have a balance")
 	}
@@ -222,7 +234,10 @@ func TestSweepSeedCoins(t *testing.T) {
 	}
 
 	// new wallet should have exactly 'sweptCoins' coins
-	_, incoming := w.UnconfirmedBalance()
+	_, incoming, err := w.UnconfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if incoming.Cmp(sweptCoins) != 0 {
 		t.Fatalf("wallet should have correct balance after sweeping seed: wanted %v, got %v", sweptCoins, incoming)
 	}
@@ -235,7 +250,7 @@ func TestSweepSeedFunds(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester("TestSweepSeedFunds")
+	wt, err := createWalletTester("TestSweepSeedFunds", modules.ProdDependencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +262,10 @@ func TestSweepSeedFunds(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, siafundBal, _ := wt.wallet.ConfirmedBalance()
+	_, siafundBal, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if siafundBal.Cmp(types.NewCurrency64(2000)) != 0 {
 		t.Error("expecting a siafund balance of 2000 from the 1of1 key")
 	}
@@ -276,7 +294,10 @@ func TestSweepSeedFunds(t *testing.T) {
 	for i := types.BlockHeight(0); i < types.MaturityDelay; i++ {
 		wt.addBlockNoPayout()
 	}
-	oldCoinBalance, siafundBal, _ := wt.wallet.ConfirmedBalance()
+	oldCoinBalance, siafundBal, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if siafundBal.Cmp(types.NewCurrency64(1988)) != 0 {
 		t.Errorf("expecting balance of %v after sending siafunds to the seed, got %v", 1988, siafundBal)
 	}
@@ -296,7 +317,10 @@ func TestSweepSeedFunds(t *testing.T) {
 	wt.addBlockNoPayout()
 
 	// Wallet balance should have decreased to pay for the sweep transaction.
-	newCoinBalance, _, _ := wt.wallet.ConfirmedBalance()
+	newCoinBalance, _, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if newCoinBalance.Cmp(oldCoinBalance) >= 0 {
 		t.Error("expecting balance to go down; instead, increased by", newCoinBalance.Sub(oldCoinBalance))
 	}
@@ -310,7 +334,7 @@ func TestSweepSeedSentFunds(t *testing.T) {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester("TestSweepSeedSentFunds")
+	wt, err := createWalletTester("TestSweepSeedSentFunds", modules.ProdDependencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +346,10 @@ func TestSweepSeedSentFunds(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, siafundBal, _ := wt.wallet.ConfirmedBalance()
+	_, siafundBal, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if siafundBal.Cmp(types.NewCurrency64(2000)) != 0 {
 		t.Error("expecting a siafund balance of 2000 from the 1of1 key")
 	}
@@ -364,7 +391,10 @@ func TestSweepSeedSentFunds(t *testing.T) {
 	for i := types.BlockHeight(0); i < types.MaturityDelay; i++ {
 		wt.addBlockNoPayout()
 	}
-	oldCoinBalance, siafundBal, _ := wt.wallet.ConfirmedBalance()
+	oldCoinBalance, siafundBal, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if expected := 2000 - 12 - 10; siafundBal.Cmp(types.NewCurrency64(uint64(expected))) != 0 {
 		t.Errorf("expecting balance of %v after sending siafunds to the seed, got %v", expected, siafundBal)
 	}
@@ -384,7 +414,10 @@ func TestSweepSeedSentFunds(t *testing.T) {
 	wt.addBlockNoPayout()
 
 	// Wallet balance should have decreased to pay for the sweep transaction.
-	newCoinBalance, _, _ := wt.wallet.ConfirmedBalance()
+	newCoinBalance, _, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if newCoinBalance.Cmp(oldCoinBalance) >= 0 {
 		t.Error("expecting balance to go down; instead, increased by", newCoinBalance.Sub(oldCoinBalance))
 	}
@@ -393,11 +426,11 @@ func TestSweepSeedSentFunds(t *testing.T) {
 // TestSweepSeedCoinsAndFunds tests that sweeping a seed results in the
 // transfer of its siacoin and siafund outputs to the wallet.
 func TestSweepSeedCoinsAndFunds(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || !build.VLONG {
 		t.SkipNow()
 	}
 	t.Parallel()
-	wt, err := createWalletTester("TestSweepSeedCoinsAndFunds")
+	wt, err := createWalletTester("TestSweepSeedCoinsAndFunds", modules.ProdDependencies)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +442,10 @@ func TestSweepSeedCoinsAndFunds(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, siafundBal, _ := wt.wallet.ConfirmedBalance()
+	_, siafundBal, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if siafundBal.Cmp(types.NewCurrency64(2000)) != 0 {
 		t.Error("expecting a siafund balance of 2000 from the 1of1 key")
 	}
@@ -439,7 +475,10 @@ func TestSweepSeedCoinsAndFunds(t *testing.T) {
 	for i := types.BlockHeight(0); i < types.MaturityDelay; i++ {
 		wt.addBlockNoPayout()
 	}
-	oldCoinBalance, siafundBal, _ := wt.wallet.ConfirmedBalance()
+	oldCoinBalance, siafundBal, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if siafundBal.Cmp(types.NewCurrency64(1988)) != 0 {
 		t.Errorf("expecting balance of %v after sending siafunds to the seed, got %v", 1988, siafundBal)
 	}
@@ -459,7 +498,10 @@ func TestSweepSeedCoinsAndFunds(t *testing.T) {
 	wt.addBlockNoPayout()
 
 	// Wallet balance should have decreased to pay for the sweep transaction.
-	newCoinBalance, _, _ := wt.wallet.ConfirmedBalance()
+	newCoinBalance, _, _, err := wt.wallet.ConfirmedBalance()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if newCoinBalance.Cmp(oldCoinBalance) <= 0 {
 		t.Error("expecting balance to go up; instead, decreased by", oldCoinBalance.Sub(newCoinBalance))
 	}

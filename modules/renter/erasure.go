@@ -1,6 +1,7 @@
 package renter
 
 import (
+	"fmt"
 	"io"
 
 	"github.com/klauspost/reedsolomon"
@@ -40,12 +41,28 @@ func (rs *rsCode) Encode(data []byte) ([][]byte, error) {
 	return pieces, nil
 }
 
-// Recover recovers the original data from pieces (including parity) and
-// writes it to w. pieces should be identical to the slice returned by
-// Encode (length and order must be preserved), but with missing elements
-// set to nil.
+// EncodeShards creates the parity shards for an already sharded input.
+func (rs *rsCode) EncodeShards(pieces [][]byte) ([][]byte, error) {
+	// Check that the caller provided the minimum amount of pieces.
+	if len(pieces) != rs.MinPieces() {
+		return nil, fmt.Errorf("invalid number of pieces given %v %v", len(pieces), rs.MinPieces())
+	}
+	// Add the parity shards to pieces.
+	for len(pieces) < rs.NumPieces() {
+		pieces = append(pieces, make([]byte, pieceSize))
+	}
+	err := rs.enc.Encode(pieces)
+	if err != nil {
+		return nil, err
+	}
+	return pieces, nil
+}
+
+// Recover recovers the original data from pieces and writes it to w.
+// pieces should be identical to the slice returned by Encode (length and
+// order must be preserved), but with missing elements set to nil.
 func (rs *rsCode) Recover(pieces [][]byte, n uint64, w io.Writer) error {
-	err := rs.enc.Reconstruct(pieces)
+	err := rs.enc.ReconstructData(pieces)
 	if err != nil {
 		return err
 	}

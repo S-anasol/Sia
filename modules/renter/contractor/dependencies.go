@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/NebulousLabs/Sia/modules"
+	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/Sia/types"
 )
 
@@ -11,7 +12,7 @@ import (
 // interface possible makes it easier to mock these dependencies in testing.
 type (
 	consensusSet interface {
-		ConsensusSetSubscribe(modules.ConsensusSetSubscriber, modules.ConsensusChangeID) error
+		ConsensusSetSubscribe(modules.ConsensusSetSubscriber, modules.ConsensusChangeID, <-chan struct{}) error
 		Synced() bool
 		Unsubscribe(modules.ConsensusSetSubscriber)
 	}
@@ -20,11 +21,11 @@ type (
 	// transactionBuilder.
 	walletShim interface {
 		NextAddress() (types.UnlockConditions, error)
-		StartTransaction() modules.TransactionBuilder
+		StartTransaction() (modules.TransactionBuilder, error)
 	}
 	wallet interface {
 		NextAddress() (types.UnlockConditions, error)
-		StartTransaction() transactionBuilder
+		StartTransaction() (transactionBuilder, error)
 	}
 	transactionBuilder interface {
 		AddArbitraryData([]byte) uint64
@@ -37,6 +38,7 @@ type (
 		Drop()
 		FundSiacoins(types.Currency) error
 		Sign(bool) ([]types.Transaction, error)
+		UnconfirmedParents() ([]types.Transaction, error)
 		View() (types.Transaction, []types.Transaction)
 		ViewAdded() (parents, coins, funds, signatures []int)
 	}
@@ -49,66 +51,54 @@ type (
 		AllHosts() []modules.HostDBEntry
 		ActiveHosts() []modules.HostDBEntry
 		Host(types.SiaPublicKey) (modules.HostDBEntry, bool)
-		RandomHosts(n int, exclude []types.SiaPublicKey) []modules.HostDBEntry
+		IncrementSuccessfulInteractions(key types.SiaPublicKey)
+		IncrementFailedInteractions(key types.SiaPublicKey)
+		RandomHosts(n int, exclude []types.SiaPublicKey) ([]modules.HostDBEntry, error)
+		ScoreBreakdown(modules.HostDBEntry) modules.HostScoreBreakdown
 	}
 
 	persister interface {
 		save(contractorPersist) error
-		update(...journalUpdate) error
 		load(*contractorPersist) error
-		Close() error
 	}
 )
 
-// Because wallet is not directly compatible with modules.Wallet (wrong
-// type signature for StartTransaction), we must provide a bridge type.
-type walletBridge struct {
-	w walletShim
+// WalletBridge is a bridge for the wallet because wallet is not directly
+// compatible with modules.Wallet (wrong type signature for StartTransaction),
+// we must provide a bridge type.
+type WalletBridge struct {
+	W walletShim
 }
 
-func (ws *walletBridge) NextAddress() (types.UnlockConditions, error) { return ws.w.NextAddress() }
-func (ws *walletBridge) StartTransaction() transactionBuilder         { return ws.w.StartTransaction() }
+// NextAddress computes and returns the next address of the wallet.
+func (ws *WalletBridge) NextAddress() (types.UnlockConditions, error) { return ws.W.NextAddress() }
 
-// stdPersist implements the persister interface via the journal type. The
-// filename required by these functions is internal to stdPersist.
+// StartTransaction creates a new transactionBuilder that can be used to create
+// and sign a transaction.
+func (ws *WalletBridge) StartTransaction() (transactionBuilder, error) { return ws.W.StartTransaction() }
+
+// stdPersist implements the persister interface. The filename required by
+// these functions is internal to stdPersist.
 type stdPersist struct {
-	journal  *journal
 	filename string
 }
 
-func (p *stdPersist) save(data contractorPersist) error {
-	if p.journal == nil {
-		var err error
-		p.journal, err = newJournal(p.filename, data)
-		return err
-	}
-	return p.journal.checkpoint(data)
+var persistMeta = persist.Metadata{
+	Header:  "Contractor Persistence",
+	Version: "1.3.1",
 }
 
-func (p *stdPersist) update(us ...journalUpdate) error {
-	return p.journal.update(us)
+func (p *stdPersist) save(data contractorPersist) error {
+	return persist.SaveJSON(persistMeta, data, p.filename)
 }
 
 func (p *stdPersist) load(data *contractorPersist) error {
-	var err error
-	p.journal, err = openJournal(p.filename, data)
-	if err != nil {
-		// Try loading old persist.
-		err = loadv110persist(filepath.Dir(p.filename), data)
-		if err != nil {
-			return err
-		}
-		p.journal, err = newJournal(p.filename, *data)
-	}
-	return err
+	return persist.LoadJSON(persistMeta, &data, p.filename)
 }
 
-func (p stdPersist) Close() error {
-	return p.journal.Close()
-}
-
-func newPersist(dir string) *stdPersist {
+// NewPersist create a new stdPersist.
+func NewPersist(dir string) *stdPersist {
 	return &stdPersist{
-		filename: filepath.Join(dir, "contractor.journal"),
+		filename: filepath.Join(dir, "contractor.json"),
 	}
 }

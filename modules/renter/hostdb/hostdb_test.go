@@ -2,6 +2,7 @@ package hostdb
 
 import (
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,8 +40,6 @@ type hdbTester struct {
 func bareHostDB() *HostDB {
 	hdb := &HostDB{
 		log: persist.NewLogger(ioutil.Discard),
-
-		scanPool: make(chan modules.HostDBEntry),
 	}
 	hdb.hostTree = hosttree.New(hdb.calculateHostWeight)
 	return hdb
@@ -63,12 +62,12 @@ func makeHostDBEntry() modules.HostDBEntry {
 // newHDBTester returns a tester object wrapping a HostDB and some extra
 // information for testing.
 func newHDBTester(name string) (*hdbTester, error) {
-	return newHDBTesterDeps(name, prodDependencies{})
+	return newHDBTesterDeps(name, modules.ProdDependencies)
 }
 
 // newHDBTesterDeps returns a tester object wrapping a HostDB and some extra
 // information for testing, using the provided dependencies for the hostdb.
-func newHDBTesterDeps(name string, deps dependencies) (*hdbTester, error) {
+func newHDBTesterDeps(name string, deps modules.Dependencies) (*hdbTester, error) {
 	if testing.Short() {
 		panic("should not be calling newHDBTester during short tests")
 	}
@@ -94,7 +93,7 @@ func newHDBTesterDeps(name string, deps dependencies) (*hdbTester, error) {
 	if err != nil {
 		return nil, err
 	}
-	hdb, err := newHostDB(g, cs, filepath.Join(testDir, modules.RenterDir), deps)
+	hdb, err := NewCustomHostDB(g, cs, filepath.Join(testDir, modules.RenterDir), deps)
 	if err != nil {
 		return nil, err
 	}
@@ -201,11 +200,11 @@ func TestNew(t *testing.T) {
 
 // quitAfterLoadDeps will quit startup in newHostDB
 type disableScanLoopDeps struct {
-	prodDependencies
+	modules.ProductionDependencies
 }
 
 // Send a disrupt signal to the quitAfterLoad codebreak.
-func (disableScanLoopDeps) disrupt(s string) bool {
+func (*disableScanLoopDeps) Disrupt(s string) bool {
 	if s == "disableScanLoop" {
 		return true
 	}
@@ -217,7 +216,7 @@ func TestRandomHosts(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
 	}
-	hdbt, err := newHDBTesterDeps(t.Name(), disableScanLoopDeps{})
+	hdbt, err := newHDBTesterDeps(t.Name(), &disableScanLoopDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +234,10 @@ func TestRandomHosts(t *testing.T) {
 
 	// Check that all hosts can be queried.
 	for i := 0; i < 25; i++ {
-		hosts := hdbt.hdb.RandomHosts(nEntries, nil)
+		hosts, err := hdbt.hdb.RandomHosts(nEntries, nil)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(hosts) != nEntries {
 			t.Errorf("RandomHosts returned few entries. got %v wanted %v\n", len(hosts), nEntries)
 		}
@@ -255,7 +257,10 @@ func TestRandomHosts(t *testing.T) {
 
 	// Base case, fill out a map exposing hosts from a single RH query.
 	dupCheck1 := make(map[string]modules.HostDBEntry)
-	hosts := hdbt.hdb.RandomHosts(nEntries/2, nil)
+	hosts, err := hdbt.hdb.RandomHosts(nEntries/2, nil)
+	if err != nil {
+		t.Fatal("Failed to get hosts", err)
+	}
 	if len(hosts) != nEntries/2 {
 		t.Fatalf("RandomHosts returned few entries. got %v wanted %v\n", len(hosts), nEntries/2)
 	}
@@ -276,7 +281,10 @@ func TestRandomHosts(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		dupCheck2 := make(map[string]modules.HostDBEntry)
 		var overlap, disjoint bool
-		hosts = hdbt.hdb.RandomHosts(nEntries/2, nil)
+		hosts, err = hdbt.hdb.RandomHosts(nEntries/2, nil)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(hosts) != nEntries/2 {
 			t.Fatalf("RandomHosts returned few entries. got %v wanted %v\n", len(hosts), nEntries/2)
 		}
@@ -307,12 +315,18 @@ func TestRandomHosts(t *testing.T) {
 	// Try exclude list by excluding every host except for the last one, and
 	// doing a random select.
 	for i := 0; i < 25; i++ {
-		hosts := hdbt.hdb.RandomHosts(nEntries, nil)
+		hosts, err := hdbt.hdb.RandomHosts(nEntries, nil)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		var exclude []types.SiaPublicKey
 		for j := 1; j < len(hosts); j++ {
 			exclude = append(exclude, hosts[j].PublicKey)
 		}
-		rand := hdbt.hdb.RandomHosts(1, exclude)
+		rand, err := hdbt.hdb.RandomHosts(1, exclude)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(rand) != 1 {
 			t.Fatal("wrong number of hosts returned")
 		}
@@ -321,7 +335,10 @@ func TestRandomHosts(t *testing.T) {
 		}
 
 		// Try again but request more hosts than are available.
-		rand = hdbt.hdb.RandomHosts(5, exclude)
+		rand, err = hdbt.hdb.RandomHosts(5, exclude)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(rand) != 1 {
 			t.Fatal("wrong number of hosts returned")
 		}
@@ -340,7 +357,10 @@ func TestRandomHosts(t *testing.T) {
 
 		// Select only 20 hosts.
 		dupCheck := make(map[string]struct{})
-		rand = hdbt.hdb.RandomHosts(20, exclude)
+		rand, err = hdbt.hdb.RandomHosts(20, exclude)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(rand) != 20 {
 			t.Error("random hosts is returning the wrong number of hosts")
 		}
@@ -358,7 +378,10 @@ func TestRandomHosts(t *testing.T) {
 
 		// Select exactly 50 hosts.
 		dupCheck = make(map[string]struct{})
-		rand = hdbt.hdb.RandomHosts(50, exclude)
+		rand, err = hdbt.hdb.RandomHosts(50, exclude)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(rand) != 50 {
 			t.Error("random hosts is returning the wrong number of hosts")
 		}
@@ -376,7 +399,10 @@ func TestRandomHosts(t *testing.T) {
 
 		// Select 100 hosts.
 		dupCheck = make(map[string]struct{})
-		rand = hdbt.hdb.RandomHosts(100, exclude)
+		rand, err = hdbt.hdb.RandomHosts(100, exclude)
+		if err != nil {
+			t.Fatal("Failed to get hosts", err)
+		}
 		if len(rand) != 50 {
 			t.Error("random hosts is returning the wrong number of hosts")
 		}
@@ -409,5 +435,151 @@ func TestRemoveNonexistingHostFromHostTree(t *testing.T) {
 	err = hdbt.hdb.hostTree.Remove(types.SiaPublicKey{})
 	if err == nil {
 		t.Fatal("There should be an error, but not a panic:", err)
+	}
+}
+
+// TestUpdateHistoricInteractions is a simple check to ensure that incrementing
+// the recent and historic host interactions works
+func TestUpdateHistoricInteractions(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	// create a HostDB tester without scanloop to be able to manually increment
+	// the interactions without interference.
+	hdbt, err := newHDBTesterDeps(t.Name(), &disableScanLoopDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// create a HostDBEntry and add it to the tree
+	host := makeHostDBEntry()
+	err = hdbt.hdb.hostTree.Insert(host)
+	if err != nil {
+		t.Error(err)
+	}
+
+	// increment successful and failed interactions by 100
+	interactions := 100.0
+	for i := 0.0; i < interactions; i++ {
+		hdbt.hdb.IncrementSuccessfulInteractions(host.PublicKey)
+		hdbt.hdb.IncrementFailedInteractions(host.PublicKey)
+	}
+
+	// get updated host from hostdb
+	host, ok := hdbt.hdb.Host(host.PublicKey)
+	if !ok {
+		t.Fatal("Modified host not found in hostdb")
+	}
+
+	// check that recent interactions are exactly 100 and historic interactions are 0
+	if host.RecentFailedInteractions != interactions || host.RecentSuccessfulInteractions != interactions {
+		t.Errorf("Interactions should be %v but were %v and %v", interactions,
+			host.RecentFailedInteractions, host.RecentSuccessfulInteractions)
+	}
+	if host.HistoricFailedInteractions != 0 || host.HistoricSuccessfulInteractions != 0 {
+		t.Errorf("Historic Interactions should be %v but were %v and %v", 0,
+			host.HistoricFailedInteractions, host.HistoricSuccessfulInteractions)
+	}
+
+	// add single block to consensus
+	_, err = hdbt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// increment interactions again by 100
+	for i := 0.0; i < interactions; i++ {
+		hdbt.hdb.IncrementSuccessfulInteractions(host.PublicKey)
+		hdbt.hdb.IncrementFailedInteractions(host.PublicKey)
+	}
+
+	// get updated host from hostdb
+	host, ok = hdbt.hdb.Host(host.PublicKey)
+	if !ok {
+		t.Fatal("Modified host not found in hostdb")
+	}
+
+	// historic actions should have incremented slightly, due to the clamp the
+	// full interactions should not have made it into the historic group.
+	if host.RecentFailedInteractions != interactions || host.RecentSuccessfulInteractions != interactions {
+		t.Errorf("Interactions should be %v but were %v and %v", interactions,
+			host.RecentFailedInteractions, host.RecentSuccessfulInteractions)
+	}
+	if host.HistoricFailedInteractions == 0 || host.HistoricSuccessfulInteractions == 0 {
+		t.Error("historic actions should have updated")
+	}
+
+	// add 200 blocks to consensus, adding large numbers of historic actions
+	// each time, so that the clamp does not need to be in effect anymore.
+	for i := 0; i < 200; i++ {
+		for j := uint64(0); j < 10; j++ {
+			hdbt.hdb.IncrementSuccessfulInteractions(host.PublicKey)
+			hdbt.hdb.IncrementFailedInteractions(host.PublicKey)
+		}
+		_, err = hdbt.miner.AddBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Add five interactions
+	for i := 0; i < 5; i++ {
+		hdbt.hdb.IncrementSuccessfulInteractions(host.PublicKey)
+		hdbt.hdb.IncrementFailedInteractions(host.PublicKey)
+	}
+
+	// get updated host from hostdb
+	host, ok = hdbt.hdb.Host(host.PublicKey)
+	if !ok {
+		t.Fatal("Modified host not found in hostdb")
+	}
+
+	// check that recent interactions are exactly 5. Save the historic actions
+	// to check that decay is being handled correctly, and that the recent
+	// interactions are moved over correctly.
+	if host.RecentFailedInteractions != 5 || host.RecentSuccessfulInteractions != 5 {
+		t.Errorf("Interactions should be %v but were %v and %v", interactions,
+			host.RecentFailedInteractions, host.RecentSuccessfulInteractions)
+	}
+	historicFailed := host.HistoricFailedInteractions
+	if host.HistoricFailedInteractions != host.HistoricSuccessfulInteractions {
+		t.Error("historic failed and successful should have the same values")
+	}
+
+	// Add a single block to apply one round of decay.
+	_, err = hdbt.miner.AddBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, ok = hdbt.hdb.Host(host.PublicKey)
+	if !ok {
+		t.Fatal("Modified host not found in hostdb")
+	}
+
+	// Get the historic successful and failed interactions, and see that they
+	// are decaying properly.
+	expected := historicFailed*math.Pow(historicInteractionDecay, 1) + 5
+	if host.HistoricFailedInteractions != expected || host.HistoricSuccessfulInteractions != expected {
+		t.Errorf("Historic Interactions should be %v but were %v and %v", expected,
+			host.HistoricFailedInteractions, host.HistoricSuccessfulInteractions)
+	}
+
+	// Add 10 more blocks and check the decay again, make sure it's being
+	// applied correctly.
+	for i := 0; i < 10; i++ {
+		_, err := hdbt.miner.AddBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	host, ok = hdbt.hdb.Host(host.PublicKey)
+	if !ok {
+		t.Fatal("Modified host not found in hostdb")
+	}
+	expected = expected * math.Pow(historicInteractionDecay, 10)
+	if host.HistoricFailedInteractions != expected || host.HistoricSuccessfulInteractions != expected {
+		t.Errorf("Historic Interactions should be %v but were %v and %v", expected,
+			host.HistoricFailedInteractions, host.HistoricSuccessfulInteractions)
 	}
 }

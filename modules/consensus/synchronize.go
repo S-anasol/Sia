@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"errors"
+	"net"
 	"sync"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 const (
@@ -21,6 +22,19 @@ const (
 )
 
 var (
+	errEarlyStop         = errors.New("initial blockchain download did not complete by the time shutdown was issued")
+	errNilProcBlock      = errors.New("nil processed block was fetched from the database")
+	errSendBlocksStalled = errors.New("SendBlocks RPC timed and never received any blocks")
+
+	// ibdLoopDelay is the time that threadedInitialBlockchainDownload waits
+	// between attempts to synchronize with the network if the last attempt
+	// failed.
+	ibdLoopDelay = build.Select(build.Var{
+		Standard: 10 * time.Second,
+		Dev:      1 * time.Second,
+		Testing:  100 * time.Millisecond,
+	}).(time.Duration)
+
 	// MaxCatchUpBlocks is the maxiumum number of blocks that can be given to
 	// the consensus set in a single iteration during the initial blockchain
 	// download.
@@ -29,27 +43,6 @@ var (
 		Dev:      types.BlockHeight(50),
 		Testing:  types.BlockHeight(3),
 	}).(types.BlockHeight)
-
-	// sendBlocksTimeout is the timeout for the SendBlocks RPC.
-	sendBlocksTimeout = build.Select(build.Var{
-		Standard: 5 * time.Minute,
-		Dev:      40 * time.Second,
-		Testing:  5 * time.Second,
-	}).(time.Duration)
-
-	// sendBlkTimeout is the timeout for the SendBlocks RPC.
-	sendBlkTimeout = build.Select(build.Var{
-		Standard: 4 * time.Minute,
-		Dev:      30 * time.Second,
-		Testing:  4 * time.Second,
-	}).(time.Duration)
-
-	// relayHeaderTimeout is the timeout for the RelayHeader RPC.
-	relayHeaderTimeout = build.Select(build.Var{
-		Standard: 3 * time.Minute,
-		Dev:      20 * time.Second,
-		Testing:  3 * time.Second,
-	}).(time.Duration)
 
 	// minIBDWaitTime is the time threadedInitialBlockchainDownload waits before
 	// exiting if there are >= 1 and <= minNumOutbound peers synced. This timeout
@@ -62,18 +55,40 @@ var (
 		Testing:  10 * time.Second,
 	}).(time.Duration)
 
-	// ibdLoopDelay is the time that threadedInitialBlockchainDownload waits
-	// between attempts to synchronize with the network if the last attempt
-	// failed.
-	ibdLoopDelay = build.Select(build.Var{
-		Standard: 10 * time.Second,
-		Dev:      1 * time.Second,
-		Testing:  100 * time.Millisecond,
+	// relayHeaderTimeout is the timeout for the RelayHeader RPC.
+	relayHeaderTimeout = build.Select(build.Var{
+		Standard: 60 * time.Second,
+		Dev:      20 * time.Second,
+		Testing:  3 * time.Second,
 	}).(time.Duration)
 
-	errEarlyStop         = errors.New("initial blockchain download did not complete by the time shutdown was issued")
-	errSendBlocksStalled = errors.New("SendBlocks RPC timed and never received any blocks")
+	// sendBlkTimeout is the timeout for the SendBlk RPC.
+	sendBlkTimeout = build.Select(build.Var{
+		Standard: 90 * time.Second,
+		Dev:      30 * time.Second,
+		Testing:  4 * time.Second,
+	}).(time.Duration)
+
+	// sendBlocksTimeout is the timeout for the SendBlocks RPC.
+	sendBlocksTimeout = build.Select(build.Var{
+		Standard: 180 * time.Second,
+		Dev:      40 * time.Second,
+		Testing:  5 * time.Second,
+	}).(time.Duration)
 )
+
+// isTimeoutErr is a helper function that returns true if err was caused by a
+// network timeout.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+	// COMPATv1.3.0
+	return (err.Error() == "Read timeout" || err.Error() == "Write timeout")
+}
 
 // blockHistory returns up to 32 block ids, starting with recent blocks and
 // then proving exponentially increasingly less recent blocks. The genesis
@@ -120,21 +135,29 @@ func blockHistory(tx *bolt.Tx) (blockIDs [32]types.BlockID) {
 // managedReceiveBlocks is the calling end of the SendBlocks RPC, without the
 // threadgroup wrapping.
 func (cs *ConsensusSet) managedReceiveBlocks(conn modules.PeerConn) (returnErr error) {
-	// Set a deadline after which SendBlocks will timeout. During IBD, esepcially,
+	// Set a deadline after which SendBlocks will timeout. During IBD, especially,
 	// SendBlocks will timeout. This is by design so that IBD switches peers to
 	// prevent any one peer from stalling IBD.
 	err := conn.SetDeadline(time.Now().Add(sendBlocksTimeout))
 	if err != nil {
 		return err
 	}
+	finishedChan := make(chan struct{})
+	defer close(finishedChan)
+	go func() {
+		select {
+		case <-cs.tg.StopChan():
+		case <-finishedChan:
+		}
+		conn.Close()
+	}()
+
+	// Check whether this RPC has timed out with the remote peer at the end of
+	// the fuction, and if so, return a custom error to signal that a new peer
+	// needs to be chosen.
 	stalled := true
 	defer func() {
-		// TODO: Timeout errors returned by muxado do not conform to the net.Error
-		// interface and therefore we cannot check if the error is a timeout using
-		// the Timeout() method. Once muxado issue #14 is resolved change the below
-		// condition to:
-		//     if netErr, ok := returnErr.(net.Error); ok && netErr.Timeout() && stalled { ... }
-		if stalled && returnErr != nil && (returnErr.Error() == "Read timeout" || returnErr.Error() == "Write timeout") {
+		if isTimeoutErr(returnErr) && stalled {
 			returnErr = errSendBlocksStalled
 		}
 	}()
@@ -159,17 +182,24 @@ func (cs *ConsensusSet) managedReceiveBlocks(conn modules.PeerConn) (returnErr e
 	// Broadcast the last block accepted. This functionality is in a defer to
 	// ensure that a block is always broadcast if any blocks are accepted. This
 	// is to stop an attacker from preventing block broadcasts.
+	var initialBlock types.BlockID
+	if build.DEBUG {
+		// Prepare for a sanity check on 'chainExtended' - chain extended should
+		// be set to true if an ony if the result of calling dbCurrentBlockID
+		// changes.
+		initialBlock = cs.dbCurrentBlockID()
+	}
 	chainExtended := false
 	defer func() {
 		cs.mu.RLock()
 		synced := cs.synced
 		cs.mu.RUnlock()
-		if chainExtended && synced {
-			// The last block received will be the current block since
-			// managedAcceptBlock only returns nil if a block extends the longest chain.
-			currentBlock := cs.managedCurrentBlock()
-			// broadcast the block header to all peers
-			go cs.gateway.Broadcast("RelayHeader", currentBlock.Header(), cs.gateway.Peers())
+		if synced && chainExtended {
+			if build.DEBUG && initialBlock == cs.dbCurrentBlockID() {
+				panic("blockchain extension reporting is incorrect")
+			}
+			fullBlock := cs.managedCurrentBlock() // TODO: Add cacheing, replace this line by looking at the cache.
+			go cs.gateway.Broadcast("RelayHeader", fullBlock.Header(), cs.gateway.Peers())
 		}
 	}()
 
@@ -185,26 +215,22 @@ func (cs *ConsensusSet) managedReceiveBlocks(conn modules.PeerConn) (returnErr e
 		if err := encoding.ReadObject(conn, &moreAvailable, 1); err != nil {
 			return err
 		}
+		if len(newBlocks) == 0 {
+			continue
+		}
+		stalled = false
 
-		// Integrate the blocks into the consensus set.
-		for _, block := range newBlocks {
-			stalled = false
-			// Call managedAcceptBlock instead of AcceptBlock so as not to broadcast
-			// every block.
-			acceptErr := cs.managedAcceptBlock(block)
-			// Set a flag to indicate that we should broadcast the last block received.
-			if acceptErr == nil {
-				chainExtended = true
-			}
-			// ErrNonExtendingBlock must be ignored until headers-first block
-			// sharing is implemented, block already in database should also be
-			// ignored.
-			if acceptErr == modules.ErrNonExtendingBlock || acceptErr == modules.ErrBlockKnown {
-				acceptErr = nil
-			}
-			if acceptErr != nil {
-				return acceptErr
-			}
+		// Call managedAcceptBlock instead of AcceptBlock so as not to broadcast
+		// every block.
+		extended, acceptErr := cs.managedAcceptBlocks(newBlocks)
+		if extended {
+			chainExtended = true
+		}
+		// ErrNonExtendingBlock must be ignored until headers-first block
+		// sharing is implemented, block already in database should also be
+		// ignored.
+		if acceptErr != nil && acceptErr != modules.ErrNonExtendingBlock && acceptErr != modules.ErrBlockKnown {
+			return acceptErr
 		}
 	}
 	return nil
@@ -322,12 +348,18 @@ func (cs *ConsensusSet) rpcSendBlocks(conn modules.PeerConn) error {
 			height := blockHeight(tx)
 			for i := start; i <= height && i < start+MaxCatchUpBlocks; i++ {
 				id, err := getPath(tx, i)
-				if build.DEBUG && err != nil {
-					panic(err)
+				if err != nil {
+					cs.log.Critical("Unable to get path: height", height, ":: request", i)
+					return err
 				}
 				pb, err := getBlockMap(tx, id)
-				if build.DEBUG && err != nil {
-					panic(err)
+				if err != nil {
+					cs.log.Critical("Unable to get block from block map: height", height, ":: request", i, ":: id", id)
+					return err
+				}
+				if pb == nil {
+					cs.log.Critical("getBlockMap yielded 'nil' block:", height, ":: request", i, ":: id", id)
+					return errNilProcBlock
 				}
 				blocks = append(blocks, pb.Block)
 			}
@@ -394,17 +426,19 @@ func (cs *ConsensusSet) threadedRPCRelayHeader(conn modules.PeerConn) error {
 		return cs.validateHeader(boltTxWrapper{tx}, h)
 	})
 	cs.mu.RUnlock()
-	if err == errOrphan {
-		// If the header is an orphan, try to find the parents. Call needs to
-		// be made in a separate goroutine as execution requires calling an
-		// exported gateway method - threadedRPCRelayHeader was likely called
-		// from an exported gateway function.
-		//
-		// NOTE: In general this is bad design. Rather than recycling other
-		// calls, the whole protocol should have been kept in a single RPC.
-		// Because it is not, we have to do weird threading to prevent
-		// deadlocks, and we also have to be concerned every time the code in
-		// managedReceiveBlocks is adjusted.
+	// WARN: orphan multithreading logic (dangerous areas, see below)
+	//
+	// If the header is valid and extends the heaviest chain, fetch the
+	// corresponding block. Call needs to be made in a separate goroutine
+	// because an exported call to the gateway is used, which is a deadlock
+	// risk given that rpcRelayHeader is called from the gateway.
+	//
+	// NOTE: In general this is bad design. Rather than recycling other
+	// calls, the whole protocol should have been kept in a single RPC.
+	// Because it is not, we have to do weird threading to prevent
+	// deadlocks, and we also have to be concerned every time the code in
+	// managedReceiveBlock is adjusted.
+	if err == errOrphan { // WARN: orphan multithreading logic case #1
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -418,16 +452,7 @@ func (cs *ConsensusSet) threadedRPCRelayHeader(conn modules.PeerConn) error {
 		return err
 	}
 
-	// If the header is valid and extends the heaviest chain, fetch the
-	// corresponding block. Call needs to be made in a separate goroutine
-	// because an exported call to the gateway is used, which is a deadlock
-	// risk given that rpcRelayHeader is called from the gateway.
-	//
-	// NOTE: In general this is bad design. Rather than recycling other calls,
-	// the whole protocol should have been kept in a single RPC. Because it is
-	// not, we have to do weird threading to prevent deadlocks, and we also
-	// have to be concerned every time the code in managedReceiveBlock is
-	// adjusted.
+	// WARN: orphan multithreading logic case #2
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -491,9 +516,7 @@ func (cs *ConsensusSet) rpcSendBlk(conn modules.PeerConn) error {
 
 // managedReceiveBlock takes a block id and returns an RPCFunc that requests that
 // block and then calls AcceptBlock on it. The returned function should be used
-// as the calling end of the SendBlk RPC. Note that although the function
-// itself does not do any locking, it is still prefixed with "threaded" because
-// the function it returns calls the exported method AcceptBlock.
+// as the calling end of the SendBlk RPC.
 func (cs *ConsensusSet) managedReceiveBlock(id types.BlockID) modules.RPCFunc {
 	return func(conn modules.PeerConn) error {
 		if err := encoding.WriteObject(conn, id); err != nil {
@@ -503,10 +526,13 @@ func (cs *ConsensusSet) managedReceiveBlock(id types.BlockID) modules.RPCFunc {
 		if err := encoding.ReadObject(conn, &block, types.BlockSizeLimit); err != nil {
 			return err
 		}
-		if err := cs.managedAcceptBlock(block); err != nil {
+		chainExtended, err := cs.managedAcceptBlocks([]types.Block{block})
+		if chainExtended {
+			cs.managedBroadcastBlock(block)
+		}
+		if err != nil {
 			return err
 		}
-		cs.managedBroadcastBlock(block)
 		return nil
 	}
 }
@@ -559,12 +585,7 @@ func (cs *ConsensusSet) threadedInitialBlockchainDownload() error {
 					return nil
 				}
 				numOutboundNotSynced++
-				// TODO: Timeout errors returned by muxado do not conform to the net.Error
-				// interface and therefore we cannot check if the error is a timeout using
-				// the Timeout() method. Once muxado issue #14 is resolved change the below
-				// condition to:
-				//     if netErr, ok := returnErr.(net.Error); !ok || !netErr.Timeout() { ... }
-				if err.Error() != "Read timeout" && err.Error() != "Write timeout" && err.Error() != "Session closed" {
+				if !isTimeoutErr(err) {
 					cs.log.Printf("WARN: disconnecting from peer %v because IBD failed: %v", p.NetAddress, err)
 					// Disconnect if there is an unexpected error (not a timeout). This
 					// includes errSendBlocksStalled.

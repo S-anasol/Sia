@@ -19,6 +19,7 @@ type (
 		AddTransactionSignature(types.TransactionSignature) uint64
 		FundSiacoins(types.Currency) error
 		Sign(bool) ([]types.Transaction, error)
+		UnconfirmedParents() ([]types.Transaction, error)
 		View() (types.Transaction, []types.Transaction)
 		ViewAdded() (parents, coins, funds, signatures []int)
 	}
@@ -27,12 +28,17 @@ type (
 		AcceptTransactionSet([]types.Transaction) error
 		FeeEstimation() (min types.Currency, max types.Currency)
 	}
+
+	hostDB interface {
+		IncrementSuccessfulInteractions(key types.SiaPublicKey)
+		IncrementFailedInteractions(key types.SiaPublicKey)
+	}
 )
 
 // ContractParams are supplied as an argument to FormContract.
 type ContractParams struct {
 	Host          modules.HostDBEntry
-	Filesize      uint64
+	Funding       types.Currency
 	StartHeight   types.BlockHeight
 	EndHeight     types.BlockHeight
 	RefundAddress types.UnlockHash

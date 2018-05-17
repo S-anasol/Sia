@@ -3,6 +3,7 @@ package contractor
 import (
 	"bytes"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,13 +11,13 @@ import (
 
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/crypto"
+	"github.com/NebulousLabs/Sia/encoding"
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/modules/consensus"
 	"github.com/NebulousLabs/Sia/modules/gateway"
 	"github.com/NebulousLabs/Sia/modules/host"
 	"github.com/NebulousLabs/Sia/modules/miner"
 	"github.com/NebulousLabs/Sia/modules/renter/hostdb"
-	"github.com/NebulousLabs/Sia/modules/renter/proto"
 	"github.com/NebulousLabs/Sia/modules/transactionpool"
 	modWallet "github.com/NebulousLabs/Sia/modules/wallet"
 	"github.com/NebulousLabs/Sia/types"
@@ -31,7 +32,11 @@ func newTestingWallet(testdir string, cs modules.ConsensusSet, tp modules.Transa
 		return nil, err
 	}
 	key := crypto.GenerateTwofishKey()
-	if !w.Encrypted() {
+	encrypted, err := w.Encrypted()
+	if err != nil {
+		return nil, err
+	}
+	if !encrypted {
 		_, err = w.Encrypt(key)
 		if err != nil {
 			return nil, err
@@ -125,7 +130,11 @@ func newTestingTrio(name string) (modules.Host, *Contractor, modules.TestMiner, 
 		return nil, nil, nil, err
 	}
 	key := crypto.GenerateTwofishKey()
-	if !w.Encrypted() {
+	encrypted, err := w.Encrypted()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !encrypted {
 		_, err = w.Encrypt(key)
 		if err != nil {
 			return nil, nil, nil, err
@@ -157,7 +166,10 @@ func newTestingTrio(name string) (modules.Host, *Contractor, modules.TestMiner, 
 	}
 
 	// mine a block, processing the announcement
-	m.AddBlock()
+	_, err = m.AddBlock()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	// wait for hostdb to scan host
 	for i := 0; i < 50 && len(c.hdb.ActiveHosts()) == 0; i++ {
@@ -191,7 +203,7 @@ func TestIntegrationFormContract(t *testing.T) {
 	}
 
 	// form a contract with the host
-	_, err = c.managedNewContract(hostEntry, 10, c.blockHeight+100)
+	_, err = c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,13 +231,10 @@ func TestIntegrationReviseContract(t *testing.T) {
 	}
 
 	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
+	contract, err := c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
 
 	// revise the contract
 	editor, err := c.Editor(contract.ID, nil)
@@ -265,13 +274,10 @@ func TestIntegrationUploadDownload(t *testing.T) {
 	}
 
 	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
+	contract, err := c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
 
 	// revise the contract
 	editor, err := c.Editor(contract.ID, nil)
@@ -301,186 +307,6 @@ func TestIntegrationUploadDownload(t *testing.T) {
 		t.Fatal("downloaded data does not match original")
 	}
 	err = downloader.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestIntegrationDelete tests that the contractor can delete a sector from a
-// contract previously formed with a host.
-func TestIntegrationDelete(t *testing.T) {
-	t.Skip("deletion is deprecated")
-
-	// create testing trio
-	h, c, _, err := newTestingTrio(t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	defer c.Close()
-
-	// get the host's entry from the db
-	hostEntry, ok := c.hdb.Host(h.PublicKey())
-	if !ok {
-		t.Fatal("no entry for host in db")
-	}
-
-	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
-
-	// revise the contract
-	editor, err := c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := fastrand.Bytes(int(modules.SectorSize))
-	_, err = editor.Upload(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.mu.Lock()
-	contract = c.contracts[contract.ID]
-	c.mu.Unlock()
-
-	// delete the sector
-	editor, err = c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Delete(contract.MerkleRoots[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestIntegrationInsertDelete tests that the contractor can insert and delete
-// a sector during the same revision.
-func TestIntegrationInsertDelete(t *testing.T) {
-	t.Skip("deletion is deprecated")
-
-	// create testing trio
-	h, c, _, err := newTestingTrio(t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	defer c.Close()
-
-	// get the host's entry from the db
-	hostEntry, ok := c.hdb.Host(h.PublicKey())
-	if !ok {
-		t.Fatal("no entry for host in db")
-	}
-
-	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
-
-	// revise the contract
-	editor, err := c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := fastrand.Bytes(int(modules.SectorSize))
-	// insert the sector
-	_, err = editor.Upload(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// delete the sector
-	err = editor.Delete(crypto.MerkleRoot(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// contract should have no sectors
-	contract = c.contracts[contract.ID]
-	if len(contract.MerkleRoots) != 0 {
-		t.Fatal("contract should have no sectors:", contract.MerkleRoots)
-	}
-}
-
-// TestIntegrationModify tests that the contractor can modify a previously-
-// uploaded sector.
-func TestIntegrationModify(t *testing.T) {
-	t.Skip("modification is deprecated")
-
-	// create testing trio
-	h, c, _, err := newTestingTrio(t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	defer c.Close()
-
-	// get the host's entry from the db
-	hostEntry, ok := c.hdb.Host(h.PublicKey())
-	if !ok {
-		t.Fatal("no entry for host in db")
-	}
-
-	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
-
-	// revise the contract
-	editor, err := c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := fastrand.Bytes(int(modules.SectorSize))
-	// insert the sector
-	_, err = editor.Upload(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// modify the sector
-	oldRoot := crypto.MerkleRoot(data)
-	offset, newData := uint64(10), []byte{1, 2, 3, 4, 5}
-	copy(data[offset:], newData)
-	newRoot := crypto.MerkleRoot(data)
-	editor, err = c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Modify(oldRoot, newRoot, offset, newData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,13 +334,10 @@ func TestIntegrationRenew(t *testing.T) {
 	}
 
 	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
+	contract, err := c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
 
 	// revise the contract
 	editor, err := c.Editor(contract.ID, nil)
@@ -533,28 +356,20 @@ func TestIntegrationRenew(t *testing.T) {
 	}
 
 	// renew the contract
-	oldContract := c.contracts[contract.ID]
-	contract, err = c.managedRenew(oldContract, modules.SectorSize*10, c.blockHeight+200)
+	err = c.managedUpdateContractUtility(contract.ID, modules.ContractUtility{GoodForRenew: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
+	oldContract, _ := c.staticContracts.Acquire(contract.ID)
+	contract, err = c.managedRenew(oldContract, types.SiacoinPrecision.Mul64(50), c.blockHeight+200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.staticContracts.Return(oldContract)
 
 	// check renewed contract
-	if contract.FileContract.FileMerkleRoot != root {
-		t.Fatal(contract.FileContract.FileMerkleRoot)
-	} else if contract.FileContract.FileSize != modules.SectorSize {
-		t.Fatal(contract.FileContract.FileSize)
-	} else if contract.FileContract.RevisionNumber != 0 {
-		t.Fatal(contract.FileContract.RevisionNumber)
-	} else if contract.FileContract.WindowStart != c.blockHeight+200 {
-		t.Fatal(contract.FileContract.WindowStart)
-	}
-	// check that Merkle roots are intact
-	if len(contract.MerkleRoots) != len(oldContract.MerkleRoots) {
-		t.Fatal(len(contract.MerkleRoots), len(oldContract.MerkleRoots))
+	if contract.EndHeight != c.blockHeight+200 {
+		t.Fatal(contract.EndHeight)
 	}
 
 	// download the renewed contract
@@ -575,21 +390,19 @@ func TestIntegrationRenew(t *testing.T) {
 	}
 
 	// renew to a lower height
-	oldContract = c.contracts[contract.ID]
-	contract, err = c.managedRenew(oldContract, modules.SectorSize*10, c.blockHeight+100)
+	err = c.managedUpdateContractUtility(contract.ID, modules.ContractUtility{GoodForRenew: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contract.FileContract.WindowStart != c.blockHeight+100 {
-		t.Fatal(contract.FileContract.WindowStart)
+	oldContract, _ = c.staticContracts.Acquire(contract.ID)
+	contract, err = c.managedRenew(oldContract, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// check that Merkle roots are intact
-	if len(contract.MerkleRoots) != len(oldContract.MerkleRoots) {
-		t.Fatal(len(contract.MerkleRoots), len(oldContract.MerkleRoots))
+	c.staticContracts.Return(oldContract)
+	if contract.EndHeight != c.blockHeight+100 {
+		t.Fatal(contract.EndHeight)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
 
 	// revise the contract
 	editor, err = c.Editor(contract.ID, nil)
@@ -606,141 +419,6 @@ func TestIntegrationRenew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-}
-
-// TestIntegrationResync tests that the contractor can resync with a host
-// after being interrupted during contract revision.
-func TestIntegrationResync(t *testing.T) {
-	if testing.Short() {
-		t.SkipNow()
-	}
-	t.Parallel()
-	// create testing trio
-	h, c, _, err := newTestingTrio(t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	defer c.Close()
-
-	// get the host's entry from the db
-	hostEntry, ok := c.hdb.Host(h.PublicKey())
-	if !ok {
-		t.Fatal("no entry for host in db")
-	}
-
-	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
-
-	// revise the contract
-	editor, err := c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := fastrand.Bytes(int(modules.SectorSize))
-	root, err := editor.Upload(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// download the data
-	downloader, err := c.Downloader(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retrieved, err := downloader.Sector(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(data, retrieved) {
-		t.Fatal("downloaded data does not match original")
-	}
-	err = downloader.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	contract = c.contracts[contract.ID]
-
-	// Add some corruption to the set of cached revisions.
-	badContract := contract
-	badContract.LastRevision.NewRevisionNumber--
-	badContract.LastRevisionTxn.TransactionSignatures = nil // delete signatures
-	c.mu.Lock()
-	cr := c.cachedRevisions[contract.ID]
-	cr.Revision.NewRevisionNumber = 0
-	cr.Revision.NewRevisionNumber--
-	c.cachedRevisions[contract.ID] = cr
-	c.contracts[badContract.ID] = badContract
-	c.mu.Unlock()
-
-	// Editor should fail with the bad contract
-	_, err = c.Editor(badContract.ID, nil)
-	if !proto.IsRevisionMismatch(err) {
-		t.Fatal("expected revision mismatch, got", err)
-	}
-
-	// add cachedRevision
-	cachedRev := cachedRevision{contract.LastRevision, contract.MerkleRoots}
-	c.mu.Lock()
-	c.cachedRevisions[contract.ID] = cachedRev
-	c.mu.Unlock()
-
-	// Editor and Downloader should now succeed after loading the cachedRevision
-	editor, err = c.Editor(badContract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	editor.Close()
-
-	downloader, err = c.Downloader(badContract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	downloader.Close()
-
-	// Add some corruption to the set of cached revisions.
-	badContract = contract
-	badContract.LastRevision.NewRevisionNumber--
-	badContract.LastRevisionTxn.TransactionSignatures = nil // delete signatures
-	c.mu.Lock()
-	cr = c.cachedRevisions[contract.ID]
-	cr.Revision.NewRevisionNumber = 0
-	cr.Revision.NewRevisionNumber--
-	c.cachedRevisions[contract.ID] = cr
-	c.contracts[badContract.ID] = badContract
-	c.mu.Unlock()
-
-	// Editor should fail with the bad contract
-	_, err = c.Editor(badContract.ID, nil)
-	if !proto.IsRevisionMismatch(err) {
-		t.Fatal("expected revision mismatch, got", err)
-	}
-
-	// add cachedRevision
-	c.mu.Lock()
-	c.cachedRevisions[contract.ID] = cachedRev
-	c.mu.Unlock()
-
-	// should be able to upload after loading the cachedRevision
-	editor, err = c.Editor(badContract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = editor.Upload(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	editor.Close()
 }
 
 // TestIntegrationDownloaderCaching tests that downloaders are properly cached
@@ -766,13 +444,10 @@ func TestIntegrationDownloaderCaching(t *testing.T) {
 	}
 
 	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
+	contract, err := c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
 
 	// create a downloader
 	d1, err := c.Downloader(contract.ID, nil)
@@ -860,13 +535,10 @@ func TestIntegrationEditorCaching(t *testing.T) {
 	}
 
 	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
+	contract, err := c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(50), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
 
 	// create an editor
 	d1, err := c.Editor(contract.ID, nil)
@@ -931,9 +603,10 @@ func TestIntegrationEditorCaching(t *testing.T) {
 	d4.Close()
 }
 
-// TestIntegrationCachedRenew tests that the contractor can renew with a host
-// after being interrupted during contract revision.
-func TestIntegrationCachedRenew(t *testing.T) {
+// TestContractPresenceLeak tests that a renter can not tell from the response
+// of the host to RPCs if the host has the contract if the renter doesn't
+// own this contract. See https://github.com/NebulousLabs/Sia/issues/2327.
+func TestContractPresenceLeak(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
 	}
@@ -953,74 +626,44 @@ func TestIntegrationCachedRenew(t *testing.T) {
 	}
 
 	// form a contract with the host
-	contract, err := c.managedNewContract(hostEntry, 10, c.blockHeight+100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.mu.Lock()
-	c.contracts[contract.ID] = contract
-	c.mu.Unlock()
-
-	// revise the contract
-	editor, err := c.Editor(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := fastrand.Bytes(int(modules.SectorSize))
-	root, err := editor.Upload(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = editor.Close()
+	contract, err := c.managedNewContract(hostEntry, types.SiacoinPrecision.Mul64(10), c.blockHeight+100)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// download the data
-	downloader, err := c.Downloader(contract.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retrieved, err := downloader.Sector(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(data, retrieved) {
-		t.Fatal("downloaded data does not match original")
-	}
-	err = downloader.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	contract = c.contracts[contract.ID]
+	// Connect with bad challenge response. Try correct
+	// and incorrect contract IDs. Compare errors.
+	wrongID := contract.ID
+	wrongID[0] ^= 0x01
+	fcids := []types.FileContractID{contract.ID, wrongID}
+	var errors []error
 
-	// corrupt the contract and cachedRevision
-	badContract := contract
-	badContract.LastRevision.NewRevisionNumber--
-	badContract.LastRevisionTxn.TransactionSignatures = nil // delete signatures
-	c.mu.Lock()
-	cr := c.cachedRevisions[contract.ID]
-	cr.Revision.NewRevisionNumber = 0
-	cr.Revision.NewRevisionNumber--
-	c.cachedRevisions[contract.ID] = cr
-	c.contracts[badContract.ID] = badContract
-	c.mu.Unlock()
-
-	// Renew should fail with the bad contract + cachedRevision
-	_, err = c.managedRenew(badContract, 20, c.blockHeight+200)
-	if !proto.IsRevisionMismatch(err) {
-		t.Fatal("expected revision mismatch, got", err)
+	for _, fcid := range fcids {
+		var challenge crypto.Hash
+		var signature crypto.Signature
+		conn, err := net.Dial("tcp", string(hostEntry.NetAddress))
+		if err != nil {
+			t.Fatalf("Couldn't dial tpc connection with host @ %v: %v.", string(hostEntry.NetAddress), err)
+		}
+		if err := encoding.WriteObject(conn, modules.RPCDownload); err != nil {
+			t.Fatalf("Couldn't initiate RPC: %v.", err)
+		}
+		if err := encoding.WriteObject(conn, fcid); err != nil {
+			t.Fatalf("Couldn't send fcid: %v.", err)
+		}
+		if err := encoding.ReadObject(conn, &challenge, 32); err != nil {
+			t.Fatalf("Couldn't read challenge: %v.", err)
+		}
+		if err := encoding.WriteObject(conn, signature); err != nil {
+			t.Fatalf("Couldn't send signature: %v.", err)
+		}
+		err = modules.ReadNegotiationAcceptance(conn)
+		if err == nil {
+			t.Fatal("Expected an error, got success.")
+		}
+		errors = append(errors, err)
 	}
-
-	// add cachedRevision
-	cachedRev := cachedRevision{contract.LastRevision, contract.MerkleRoots}
-	c.mu.Lock()
-	c.cachedRevisions[contract.ID] = cachedRev
-	c.mu.Unlock()
-
-	// Renew should now succeed after loading the cachedRevision
-	_, err = c.managedRenew(badContract, 20, c.blockHeight+200)
-	if err != nil {
-		t.Fatal(err)
+	if errors[0].Error() != errors[1].Error() {
+		t.Fatalf("Expected to get equal errors, got %q and %q.", errors[0], errors[1])
 	}
 }

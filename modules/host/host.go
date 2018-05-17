@@ -94,13 +94,6 @@ var (
 		Version: "0.5.2",
 	}
 
-	// persistMetadata is the header that gets written to the persist file, and is
-	// used to recognize other persist files.
-	persistMetadata = persist.Metadata{
-		Header:  "Sia Host",
-		Version: "1.2.0",
-	}
-
 	// errHostClosed gets returned when a call is rejected due to the host
 	// having been closed.
 	errHostClosed = errors.New("call is disabled because the host is closed")
@@ -109,6 +102,13 @@ var (
 	errNilCS     = errors.New("host cannot use a nil state")
 	errNilTpool  = errors.New("host cannot use a nil transaction pool")
 	errNilWallet = errors.New("host cannot use a nil wallet")
+
+	// persistMetadata is the header that gets written to the persist file, and is
+	// used to recognize other persist files.
+	persistMetadata = persist.Metadata{
+		Header:  "Sia Host",
+		Version: "1.2.0",
+	}
 )
 
 // A Host contains all the fields necessary for storing files for clients and
@@ -116,14 +116,13 @@ var (
 type Host struct {
 	// RPC Metrics - atomic variables need to be placed at the top to preserve
 	// compatibility with 32bit systems. These values are not persistent.
-	atomicDownloadCalls       uint64
-	atomicErroredCalls        uint64
-	atomicFormContractCalls   uint64
-	atomicRenewCalls          uint64
-	atomicReviseCalls         uint64
-	atomicRecentRevisionCalls uint64
-	atomicSettingsCalls       uint64
-	atomicUnrecognizedCalls   uint64
+	atomicDownloadCalls     uint64
+	atomicErroredCalls      uint64
+	atomicFormContractCalls uint64
+	atomicRenewCalls        uint64
+	atomicReviseCalls       uint64
+	atomicSettingsCalls     uint64
+	atomicUnrecognizedCalls uint64
 
 	// Error management. There are a few different types of errors returned by
 	// the host. These errors intentionally not persistent, so that the logging
@@ -136,10 +135,10 @@ type Host struct {
 	atomicNormalErrors        uint64
 
 	// Dependencies.
-	cs     modules.ConsensusSet
-	tpool  modules.TransactionPool
-	wallet modules.Wallet
-	dependencies
+	cs           modules.ConsensusSet
+	tpool        modules.TransactionPool
+	wallet       modules.Wallet
+	dependencies modules.Dependencies
 	modules.StorageManager
 
 	// Host ACID fields - these fields need to be updated in serial, ACID
@@ -181,7 +180,18 @@ type Host struct {
 // from the wallet. That may fail due to the wallet being locked, in which case
 // an error is returned.
 func (h *Host) checkUnlockHash() error {
-	if h.unlockHash == (types.UnlockHash{}) {
+	addrs, err := h.wallet.AllAddresses()
+	if err != nil {
+		return err
+	}
+	hasAddr := false
+	for _, addr := range addrs {
+		if h.unlockHash == addr {
+			hasAddr = true
+			break
+		}
+	}
+	if !hasAddr || h.unlockHash == (types.UnlockHash{}) {
 		uc, err := h.wallet.NextAddress()
 		if err != nil {
 			return err
@@ -204,7 +214,7 @@ func (h *Host) checkUnlockHash() error {
 // mocked such that the dependencies can return unexpected errors or unique
 // behaviors during testing, enabling easier testing of the failure modes of
 // the Host.
-func newHost(dependencies dependencies, cs modules.ConsensusSet, tpool modules.TransactionPool, wallet modules.Wallet, listenerAddress string, persistDir string) (*Host, error) {
+func newHost(dependencies modules.Dependencies, cs modules.ConsensusSet, tpool modules.TransactionPool, wallet modules.Wallet, listenerAddress string, persistDir string) (*Host, error) {
 	// Check that all the dependencies were provided.
 	if cs == nil {
 		return nil, errNilCS
@@ -237,14 +247,14 @@ func newHost(dependencies dependencies, cs modules.ConsensusSet, tpool modules.T
 	}()
 
 	// Create the perist directory if it does not yet exist.
-	err = dependencies.mkdirAll(h.persistDir, 0700)
+	err = dependencies.MkdirAll(h.persistDir, 0700)
 	if err != nil {
 		return nil, err
 	}
 
 	// Initialize the logger, and set up the stop call that will close the
 	// logger.
-	h.log, err = dependencies.newLogger(filepath.Join(h.persistDir, logFile))
+	h.log, err = dependencies.NewLogger(filepath.Join(h.persistDir, logFile))
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +305,7 @@ func newHost(dependencies dependencies, cs modules.ConsensusSet, tpool modules.T
 
 // New returns an initialized Host.
 func New(cs modules.ConsensusSet, tpool modules.TransactionPool, wallet modules.Wallet, address string, persistDir string) (*Host, error) {
-	return newHost(productionDependencies{}, cs, tpool, wallet, address, persistDir)
+	return newHost(modules.ProdDependencies, cs, tpool, wallet, address, persistDir)
 }
 
 // Close shuts down the host.
@@ -307,8 +317,8 @@ func (h *Host) Close() error {
 // set by the user (host is configured through InternalSettings), and are the
 // values that get displayed to other hosts on the network.
 func (h *Host) ExternalSettings() modules.HostExternalSettings {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	err := h.tg.Add()
 	if err != nil {
 		build.Critical("Call to ExternalSettings after close")

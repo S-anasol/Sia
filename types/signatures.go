@@ -7,6 +7,7 @@ package types
 // called 'UnlockConditions'.
 
 import (
+	"bytes"
 	"errors"
 
 	"github.com/NebulousLabs/Sia/crypto"
@@ -14,28 +15,49 @@ import (
 )
 
 var (
-	// These Specifiers enumerate the types of signatures that are recognized
-	// by this implementation. If a signature's type is unrecognized, the
-	// signature is treated as valid. Signatures using the special "entropy"
-	// type are always treated as invalid; see Consensus.md for more details.
-	SignatureEntropy = Specifier{'e', 'n', 't', 'r', 'o', 'p', 'y'}
-	SignatureEd25519 = Specifier{'e', 'd', '2', '5', '5', '1', '9'}
-
-	ErrEntropyKey                = errors.New("transaction tries to sign an entproy public key")
-	ErrFrivolousSignature        = errors.New("transaction contains a frivolous signature")
-	ErrInvalidPubKeyIndex        = errors.New("transaction contains a signature that points to a nonexistent public key")
+	// ErrEntropyKey is the error when a transaction tries to sign an entropy
+	// public key
+	ErrEntropyKey = errors.New("transaction tries to sign an entropy public key")
+	// ErrFrivolousSignature is the error when a transaction contains a frivolous
+	// signature
+	ErrFrivolousSignature = errors.New("transaction contains a frivolous signature")
+	// ErrInvalidPubKeyIndex is the error when a transaction contains a signature
+	// that points to a nonexistent public key
+	ErrInvalidPubKeyIndex = errors.New("transaction contains a signature that points to a nonexistent public key")
+	// ErrInvalidUnlockHashChecksum is the error when the provided unlock hash has
+	// an invalid checksum
 	ErrInvalidUnlockHashChecksum = errors.New("provided unlock hash has an invalid checksum")
-	ErrMissingSignatures         = errors.New("transaction has inputs with missing signatures")
-	ErrPrematureSignature        = errors.New("timelock on signature has not expired")
-	ErrPublicKeyOveruse          = errors.New("public key was used multiple times while signing transaction")
-	ErrSortedUniqueViolation     = errors.New("sorted unique violation")
-	ErrUnlockHashWrongLen        = errors.New("marshalled unlock hash is the wrong length")
+	// ErrMissingSignatures is the error when a transaction has inputs with missing
+	// signatures
+	ErrMissingSignatures = errors.New("transaction has inputs with missing signatures")
+	// ErrPrematureSignature is the error when the timelock on signature has not
+	// expired
+	ErrPrematureSignature = errors.New("timelock on signature has not expired")
+	// ErrPublicKeyOveruse is the error when public key was used multiple times while
+	// signing transaction
+	ErrPublicKeyOveruse = errors.New("public key was used multiple times while signing transaction")
+	// ErrSortedUniqueViolation is the error when a sorted unique violation occurs
+	ErrSortedUniqueViolation = errors.New("sorted unique violation")
+	// ErrUnlockHashWrongLen is the error when a marshalled unlock hash is the wrong
+	// length
+	ErrUnlockHashWrongLen = errors.New("marshalled unlock hash is the wrong length")
+	// ErrWholeTransactionViolation is the error when there's a covered fields violation
 	ErrWholeTransactionViolation = errors.New("covered fields violation")
 
 	// FullCoveredFields is a covered fileds object where the
 	// 'WholeTransaction' field has been set to true. The primary purpose of
 	// this variable is syntactic sugar.
 	FullCoveredFields = CoveredFields{WholeTransaction: true}
+
+	// These Specifiers enumerate the types of signatures that are recognized
+	// by this implementation. If a signature's type is unrecognized, the
+	// signature is treated as valid. Signatures using the special "entropy"
+	// type are always treated as invalid; see Consensus.md for more details.
+
+	// SignatureEd25519 is a specifier for Ed22519
+	SignatureEd25519 = Specifier{'e', 'd', '2', '5', '5', '1', '9'}
+	// SignatureEntropy is a specifier for entropy
+	SignatureEntropy = Specifier{'e', 'n', 't', 'r', 'o', 'p', 'y'}
 )
 
 type (
@@ -140,12 +162,19 @@ func Ed25519PublicKey(pk crypto.PublicKey) SiaPublicKey {
 // Timelock and SignaturesRequired are both low entropy fields; they can be
 // protected by having random public keys next to them.
 func (uc UnlockConditions) UnlockHash() UnlockHash {
+	var buf bytes.Buffer
+	e := encoder(&buf)
 	tree := crypto.NewTree()
-	tree.PushObject(uc.Timelock)
-	for i := range uc.PublicKeys {
-		tree.PushObject(uc.PublicKeys[i])
+	e.WriteUint64(uint64(uc.Timelock))
+	tree.Push(buf.Bytes())
+	buf.Reset()
+	for _, key := range uc.PublicKeys {
+		key.MarshalSia(e)
+		tree.Push(buf.Bytes())
+		buf.Reset()
 	}
-	tree.PushObject(uc.SignaturesRequired)
+	e.WriteUint64(uc.SignaturesRequired)
+	tree.Push(buf.Bytes())
 	return UnlockHash(tree.Root())
 }
 
@@ -154,54 +183,43 @@ func (uc UnlockConditions) UnlockHash() UnlockHash {
 func (t Transaction) SigHash(i int) (hash crypto.Hash) {
 	cf := t.TransactionSignatures[i].CoveredFields
 	h := crypto.NewHash()
-	enc := encoding.NewEncoder(h)
 	if cf.WholeTransaction {
-		enc.EncodeAll(
-			t.SiacoinInputs,
-			t.SiacoinOutputs,
-			t.FileContracts,
-			t.FileContractRevisions,
-			t.StorageProofs,
-			t.SiafundInputs,
-			t.SiafundOutputs,
-			t.MinerFees,
-			t.ArbitraryData,
-			t.TransactionSignatures[i].ParentID,
-			t.TransactionSignatures[i].PublicKeyIndex,
-			t.TransactionSignatures[i].Timelock,
-		)
+		t.marshalSiaNoSignatures(h)
+		h.Write(t.TransactionSignatures[i].ParentID[:])
+		encoding.WriteUint64(h, t.TransactionSignatures[i].PublicKeyIndex)
+		encoding.WriteUint64(h, uint64(t.TransactionSignatures[i].Timelock))
 	} else {
 		for _, input := range cf.SiacoinInputs {
-			enc.Encode(t.SiacoinInputs[input])
+			t.SiacoinInputs[input].MarshalSia(h)
 		}
 		for _, output := range cf.SiacoinOutputs {
-			enc.Encode(t.SiacoinOutputs[output])
+			t.SiacoinOutputs[output].MarshalSia(h)
 		}
 		for _, contract := range cf.FileContracts {
-			enc.Encode(t.FileContracts[contract])
+			t.FileContracts[contract].MarshalSia(h)
 		}
 		for _, revision := range cf.FileContractRevisions {
-			enc.Encode(t.FileContractRevisions[revision])
+			t.FileContractRevisions[revision].MarshalSia(h)
 		}
 		for _, storageProof := range cf.StorageProofs {
-			enc.Encode(t.StorageProofs[storageProof])
+			t.StorageProofs[storageProof].MarshalSia(h)
 		}
 		for _, siafundInput := range cf.SiafundInputs {
-			enc.Encode(t.SiafundInputs[siafundInput])
+			t.SiafundInputs[siafundInput].MarshalSia(h)
 		}
 		for _, siafundOutput := range cf.SiafundOutputs {
-			enc.Encode(t.SiafundOutputs[siafundOutput])
+			t.SiafundOutputs[siafundOutput].MarshalSia(h)
 		}
 		for _, minerFee := range cf.MinerFees {
-			enc.Encode(t.MinerFees[minerFee])
+			t.MinerFees[minerFee].MarshalSia(h)
 		}
 		for _, arbData := range cf.ArbitraryData {
-			enc.Encode(t.ArbitraryData[arbData])
+			encoding.WritePrefix(h, t.ArbitraryData[arbData])
 		}
 	}
 
 	for _, sig := range cf.TransactionSignatures {
-		enc.Encode(t.TransactionSignatures[sig])
+		t.TransactionSignatures[sig].MarshalSia(h)
 	}
 
 	h.Sum(hash[:0])

@@ -1,7 +1,6 @@
 package transactionpool
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,20 +11,11 @@ import (
 	"github.com/NebulousLabs/Sia/persist"
 	"github.com/NebulousLabs/Sia/types"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/NebulousLabs/errors"
+	"github.com/coreos/bbolt"
 )
 
 const tpoolSyncRate = time.Minute * 2
-
-var (
-	// errNilConsensusChange is returned if there is no consensus change in the
-	// database.
-	errNilConsensusChange = errors.New("no consensus change found")
-
-	// errNilFeeMedian is the message returned if a database does not find fee
-	// median persistance.
-	errNilFeeMedian = errors.New("no fee median found")
-)
 
 // threadedRegularSync will make sure that sync gets called on the database
 // every once in a while.
@@ -56,6 +46,7 @@ func (tp *TransactionPool) syncDB() {
 		tp.log.Severe("ERROR: failed to apply database update:", err)
 		tp.dbTx.Rollback()
 	}
+	// Begin a new tx
 	tp.dbTx, err = tp.db.Begin(true)
 	if err != nil {
 		tp.log.Severe("ERROR: failed to initialize a db transaction:", err)
@@ -65,6 +56,10 @@ func (tp *TransactionPool) syncDB() {
 // resetDB deletes all consensus related persistence from the transaction pool.
 func (tp *TransactionPool) resetDB(tx *bolt.Tx) error {
 	err := tx.DeleteBucket(bucketConfirmedTransactions)
+	if err != nil {
+		return err
+	}
+	err = tp.putRecentBlockID(tx, types.BlockID{})
 	if err != nil {
 		return err
 	}
@@ -117,7 +112,9 @@ func (tp *TransactionPool) initPersist() error {
 		return build.ExtendErr("unable to begin tpool dbTx", err)
 	}
 	tp.tg.AfterStop(func() {
+		tp.mu.Lock()
 		err := tp.dbTx.Commit()
+		tp.mu.Unlock()
 		if err != nil {
 			tp.log.Println("Unable to close transaction properly during shutdown:", err)
 		}
@@ -153,12 +150,14 @@ func (tp *TransactionPool) initPersist() error {
 	// Get the most recent block height
 	bh, err := tp.getBlockHeight(tp.dbTx)
 	if err != nil {
+		tp.log.Println("Block height is reporting as zero, setting up to subscribe from the beginning.")
 		err = tp.putBlockHeight(tp.dbTx, types.BlockHeight(0))
 		if err != nil {
 			return build.ExtendErr("unable to initialize the block height in the tpool", err)
 		}
 		err = tp.putRecentConsensusChange(tp.dbTx, modules.ConsensusChangeBeginning)
 	} else {
+		tp.log.Debugln("Transaction pool is loading from height:", bh)
 		tp.blockHeight = bh
 	}
 	if err != nil {
@@ -178,15 +177,16 @@ func (tp *TransactionPool) initPersist() error {
 	}
 
 	// Subscribe to the consensus set using the most recent consensus change.
-	err = tp.consensusSet.ConsensusSetSubscribe(tp, cc)
+	err = tp.consensusSet.ConsensusSetSubscribe(tp, cc, tp.tg.StopChan())
 	if err == modules.ErrInvalidConsensusChangeID {
+		tp.log.Println("Invalid consensus change loaded; resetting. This can take a while.")
 		// Reset and rescan because the consensus set does not recognize the
 		// provided consensus change id.
 		resetErr := tp.resetDB(tp.dbTx)
 		if resetErr != nil {
 			return resetErr
 		}
-		freshScanErr := tp.consensusSet.ConsensusSetSubscribe(tp, modules.ConsensusChangeBeginning)
+		freshScanErr := tp.consensusSet.ConsensusSetSubscribe(tp, modules.ConsensusChangeBeginning, tp.tg.StopChan())
 		if freshScanErr != nil {
 			return freshScanErr
 		}
@@ -204,13 +204,19 @@ func (tp *TransactionPool) initPersist() error {
 	return nil
 }
 
-// transactionConfirmed returns true if the transaction has been confirmed on
-// the blockchain and false if the transaction has not been confirmed on the
-// blockchain.
-func (tp *TransactionPool) transactionConfirmed(tx *bolt.Tx, id types.TransactionID) bool {
-	confirmedBytes := tx.Bucket(bucketConfirmedTransactions).Get(id[:])
-	if confirmedBytes == nil {
-		return false
+// TransactionConfirmed returns true if the transaction has been seen on the
+// blockchain. Note, however, that the block containing the transaction may
+// later be invalidated by a reorg.
+func (tp *TransactionPool) TransactionConfirmed(id types.TransactionID) (bool, error) {
+	if err := tp.tg.Add(); err != nil {
+		return false, errors.AddContext(err, "cannot check transaction status, the transaction pool has closed")
 	}
-	return true
+	defer tp.tg.Done()
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return tp.transactionConfirmed(tp.dbTx, id), nil
+}
+
+func (tp *TransactionPool) transactionConfirmed(tx *bolt.Tx, id types.TransactionID) bool {
+	return tx.Bucket(bucketConfirmedTransactions).Get(id[:]) != nil
 }

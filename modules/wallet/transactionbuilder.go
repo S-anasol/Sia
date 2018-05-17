@@ -10,7 +10,7 @@ import (
 	"github.com/NebulousLabs/Sia/modules"
 	"github.com/NebulousLabs/Sia/types"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 var (
@@ -19,15 +19,15 @@ var (
 	// meaning that future calls to Sign will result in an invalid transaction.
 	errBuilderAlreadySigned = errors.New("sign has already been called on this transaction builder, multiple calls can cause issues")
 
-	// errSpendHeightTooHigh indicates an output's spend height is greater than
-	// the allowed height.
-	errSpendHeightTooHigh = errors.New("output spend height exceeds the allowed height")
+	// errDustOutput indicates an output is not spendable because it is dust.
+	errDustOutput = errors.New("output is too small")
 
 	// errOutputTimelock indicates an output's timelock is still active.
 	errOutputTimelock = errors.New("wallet consensus set height is lower than the output timelock")
 
-	// errDustOutput indicates an output is not spendable because it is dust.
-	errDustOutput = errors.New("output is too small")
+	// errSpendHeightTooHigh indicates an output's spend height is greater than
+	// the allowed height.
+	errSpendHeightTooHigh = errors.New("output spend height exceeds the allowed height")
 )
 
 // transactionBuilder allows transactions to be manually constructed, including
@@ -92,9 +92,9 @@ func addSignatures(txn *types.Transaction, cf types.CoveredFields, uc types.Unlo
 }
 
 // checkOutput is a helper function used to determine if an output is usable.
-func (w *Wallet) checkOutput(tx *bolt.Tx, currentHeight types.BlockHeight, id types.SiacoinOutputID, output types.SiacoinOutput) error {
+func (w *Wallet) checkOutput(tx *bolt.Tx, currentHeight types.BlockHeight, id types.SiacoinOutputID, output types.SiacoinOutput, dustThreshold types.Currency) error {
 	// Check that an output is not dust
-	if output.Value.Cmp(dustValue()) < 0 {
+	if output.Value.Cmp(dustThreshold) < 0 {
 		return errDustOutput
 	}
 	// Check that this output has not recently been spent by the wallet.
@@ -117,6 +117,12 @@ func (w *Wallet) checkOutput(tx *bolt.Tx, currentHeight types.BlockHeight, id ty
 // correct value. The siacoin input will not be signed until 'Sign' is called
 // on the transaction builder.
 func (tb *transactionBuilder) FundSiacoins(amount types.Currency) error {
+	// dustThreshold has to be obtained separate from the lock
+	dustThreshold, err := tb.wallet.DustThreshold()
+	if err != nil {
+		return err
+	}
+
 	tb.wallet.mu.Lock()
 	defer tb.wallet.mu.Unlock()
 
@@ -162,7 +168,7 @@ func (tb *transactionBuilder) FundSiacoins(amount types.Currency) error {
 		scoid := so.ids[i]
 		sco := so.outputs[i]
 		// Check that the output can be spent.
-		if err := tb.wallet.checkOutput(tb.wallet.dbTx, consensusHeight, scoid, sco); err != nil {
+		if err := tb.wallet.checkOutput(tb.wallet.dbTx, consensusHeight, scoid, sco, dustThreshold); err != nil {
 			if err == errSpendHeightTooHigh {
 				potentialFund = potentialFund.Add(sco.Value)
 			}
@@ -217,7 +223,7 @@ func (tb *transactionBuilder) FundSiacoins(amount types.Currency) error {
 		parentTxn.SiacoinOutputs = append(parentTxn.SiacoinOutputs, refundOutput)
 	}
 
-	// Sign all of the inputs to the parent trancstion.
+	// Sign all of the inputs to the parent transaction.
 	for _, sci := range parentTxn.SiacoinInputs {
 		addSignatures(&parentTxn, types.FullCoveredFields, sci.UnlockConditions, crypto.Hash(sci.ParentID), tb.wallet.keys[sci.UnlockConditions.UnlockHash()])
 	}
@@ -349,7 +355,7 @@ func (tb *transactionBuilder) FundSiafunds(amount types.Currency) error {
 		parentTxn.SiafundOutputs = append(parentTxn.SiafundOutputs, refundOutput)
 	}
 
-	// Sign all of the inputs to the parent trancstion.
+	// Sign all of the inputs to the parent transaction.
 	for _, sfi := range parentTxn.SiafundInputs {
 		addSignatures(&parentTxn, types.FullCoveredFields, sfi.UnlockConditions, crypto.Hash(sfi.ParentID), tb.wallet.keys[sfi.UnlockConditions.UnlockHash()])
 	}
@@ -377,6 +383,43 @@ func (tb *transactionBuilder) FundSiafunds(amount types.Currency) error {
 		}
 	}
 	return nil
+}
+
+// UnconfirmedParents returns the unconfirmed parents of the transaction set
+// that is being constructed by the transaction builder.
+func (tb *transactionBuilder) UnconfirmedParents() (parents []types.Transaction, err error) {
+	// Currently we don't need to call UnconfirmedParents after the transaction
+	// was signed so we don't allow doing that. If for some reason our
+	// requirements change, we can remove this check. The only downside is,
+	// that it might lead to transactions being returned that are not actually
+	// parents in case the signed transaction already has child transactions.
+	if tb.signed {
+		return nil, errBuilderAlreadySigned
+	}
+	addedParents := make(map[types.TransactionID]struct{})
+	for _, p := range tb.parents {
+		for _, sci := range p.SiacoinInputs {
+			tSet := tb.wallet.tpool.TransactionSet(crypto.Hash(sci.ParentID))
+			for _, txn := range tSet {
+				// Add the transaction to the parents.
+				txnID := txn.ID()
+				if _, exists := addedParents[txnID]; exists {
+					continue
+				}
+				addedParents[txnID] = struct{}{}
+				parents = append(parents, txn)
+
+				// When we found the transaction that contains the output that
+				// is spent by sci we stop to avoid adding child transactions.
+				for i := range txn.SiacoinOutputs {
+					if txn.SiacoinOutputID(uint64(i)) == sci.ParentID {
+						break
+					}
+				}
+			}
+		}
+	}
+	return
 }
 
 // AddParents adds a set of parents to the transaction.
@@ -620,14 +663,22 @@ func (w *Wallet) registerTransaction(t types.Transaction, parents []types.Transa
 // modules.TransactionBuilder which can be used to expand the transaction. The
 // most typical call is 'RegisterTransaction(types.Transaction{}, nil)', which
 // registers a new transaction without parents.
-func (w *Wallet) RegisterTransaction(t types.Transaction, parents []types.Transaction) modules.TransactionBuilder {
+func (w *Wallet) RegisterTransaction(t types.Transaction, parents []types.Transaction) (modules.TransactionBuilder, error) {
+	if err := w.tg.Add(); err != nil {
+		return nil, err
+	}
+	defer w.tg.Done()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.registerTransaction(t, parents)
+	return w.registerTransaction(t, parents), nil
 }
 
 // StartTransaction is a convenience function that calls
 // RegisterTransaction(types.Transaction{}, nil).
-func (w *Wallet) StartTransaction() modules.TransactionBuilder {
+func (w *Wallet) StartTransaction() (modules.TransactionBuilder, error) {
+	if err := w.tg.Add(); err != nil {
+		return nil, err
+	}
+	defer w.tg.Done()
 	return w.RegisterTransaction(types.Transaction{}, nil)
 }

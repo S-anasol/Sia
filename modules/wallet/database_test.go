@@ -8,11 +8,15 @@ import (
 	"github.com/NebulousLabs/Sia/build"
 	"github.com/NebulousLabs/Sia/modules"
 
-	"github.com/NebulousLabs/bolt"
+	"github.com/coreos/bbolt"
 )
 
 // TestDBOpen tests the wallet.openDB method.
 func TestDBOpen(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
 	w := new(Wallet)
 	err := w.openDB("")
 	if err == nil {
