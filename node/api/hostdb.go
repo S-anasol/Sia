@@ -91,9 +91,13 @@ func (api *API) hostdbAllHandler(w http.ResponseWriter, req *http.Request, _ htt
 		if len(host.ScanHistory) == 0 {
 			isActive = false
 		}
-		if !host.ScanHistory[len(host.ScanHistory)-1].Success {
-			isActive = false
+
+		if isActive {
+			if !host.ScanHistory[len(host.ScanHistory)-1].Success {
+				isActive = false
+			}
 		}
+
 		if !host.AcceptingContracts {
 			isActive = false
 		}

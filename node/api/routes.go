@@ -26,10 +26,11 @@ func (api *API) buildHTTPRoutes(requiredUserAgent string, requiredPassword strin
 		router.GET("/consensus/blocks/:height", api.consensusBlocksbyHeightHandler)
 	}
 
+	router.GET("/explorer/blocks/:height", api.explorerBlocksHandler)
+
 	// Explorer API Calls
 	if api.explorer != nil {
 		router.GET("/explorer", api.explorerHandler)
-		router.GET("/explorer/blocks/:height", api.explorerBlocksHandler)
 		router.GET("/explorer/hashes/:hash", api.explorerHashHandler)
 	}
 

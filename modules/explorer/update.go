@@ -49,10 +49,10 @@ func (e *Explorer) ProcessConsensusChange(cc modules.ConsensusChange) {
 			dbRemoveBlockTarget(tx, bid, target)
 
 			// Remove miner payouts
-			for j, payout := range block.MinerPayouts {
+			for j, _ := range block.MinerPayouts {
 				scoid := block.MinerPayoutID(uint64(j))
 				dbRemoveSiacoinOutputID(tx, scoid, tbid)
-				dbRemoveUnlockHash(tx, payout.UnlockHash, tbid)
+				//dbRemoveUnlockHash(tx, payout.UnlockHash, tbid)
 			}
 
 			// Remove transactions
@@ -62,59 +62,59 @@ func (e *Explorer) ProcessConsensusChange(cc modules.ConsensusChange) {
 
 				for _, sci := range txn.SiacoinInputs {
 					dbRemoveSiacoinOutputID(tx, sci.ParentID, txid)
-					dbRemoveUnlockHash(tx, sci.UnlockConditions.UnlockHash(), txid)
+					//dbRemoveUnlockHash(tx, sci.UnlockConditions.UnlockHash(), txid)
 				}
-				for k, sco := range txn.SiacoinOutputs {
+				for k, _ := range txn.SiacoinOutputs {
 					scoid := txn.SiacoinOutputID(uint64(k))
 					dbRemoveSiacoinOutputID(tx, scoid, txid)
-					dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
+					//dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
 					dbRemoveSiacoinOutput(tx, scoid)
 				}
 				for k, fc := range txn.FileContracts {
 					fcid := txn.FileContractID(uint64(k))
 					dbRemoveFileContractID(tx, fcid, txid)
-					dbRemoveUnlockHash(tx, fc.UnlockHash, txid)
-					for l, sco := range fc.ValidProofOutputs {
+					//dbRemoveUnlockHash(tx, fc.UnlockHash, txid)
+					for l, _ := range fc.ValidProofOutputs {
 						scoid := fcid.StorageProofOutputID(types.ProofValid, uint64(l))
 						dbRemoveSiacoinOutputID(tx, scoid, txid)
-						dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
+						//dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
 					}
-					for l, sco := range fc.MissedProofOutputs {
+					for l, _ := range fc.MissedProofOutputs {
 						scoid := fcid.StorageProofOutputID(types.ProofMissed, uint64(l))
 						dbRemoveSiacoinOutputID(tx, scoid, txid)
-						dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
+						//dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
 					}
 					dbRemoveFileContract(tx, fcid)
 				}
 				for _, fcr := range txn.FileContractRevisions {
 					dbRemoveFileContractID(tx, fcr.ParentID, txid)
-					dbRemoveUnlockHash(tx, fcr.UnlockConditions.UnlockHash(), txid)
-					dbRemoveUnlockHash(tx, fcr.NewUnlockHash, txid)
-					for l, sco := range fcr.NewValidProofOutputs {
+					//dbRemoveUnlockHash(tx, fcr.UnlockConditions.UnlockHash(), txid)
+					//dbRemoveUnlockHash(tx, fcr.NewUnlockHash, txid)
+					for l, _ := range fcr.NewValidProofOutputs {
 						scoid := fcr.ParentID.StorageProofOutputID(types.ProofValid, uint64(l))
 						dbRemoveSiacoinOutputID(tx, scoid, txid)
-						dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
+						//dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
 					}
-					for l, sco := range fcr.NewMissedProofOutputs {
+					for l, _ := range fcr.NewMissedProofOutputs {
 						scoid := fcr.ParentID.StorageProofOutputID(types.ProofMissed, uint64(l))
 						dbRemoveSiacoinOutputID(tx, scoid, txid)
-						dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
+						//dbRemoveUnlockHash(tx, sco.UnlockHash, txid)
 					}
 					// Remove the file contract revision from the revision chain.
 					dbRemoveFileContractRevision(tx, fcr.ParentID)
 				}
-				for _, sp := range txn.StorageProofs {
-					dbRemoveStorageProof(tx, sp.ParentID)
-				}
+				// for _, _ := range txn.StorageProofs {
+				// 	//dbRemoveStorageProof(tx, sp.ParentID)
+				// }
 				for _, sfi := range txn.SiafundInputs {
 					dbRemoveSiafundOutputID(tx, sfi.ParentID, txid)
-					dbRemoveUnlockHash(tx, sfi.UnlockConditions.UnlockHash(), txid)
-					dbRemoveUnlockHash(tx, sfi.ClaimUnlockHash, txid)
+					//dbRemoveUnlockHash(tx, sfi.UnlockConditions.UnlockHash(), txid)
+					//dbRemoveUnlockHash(tx, sfi.ClaimUnlockHash, txid)
 				}
-				for k, sfo := range txn.SiafundOutputs {
+				for k, _ := range txn.SiafundOutputs {
 					sfoid := txn.SiafundOutputID(uint64(k))
 					dbRemoveSiafundOutputID(tx, sfoid, txid)
-					dbRemoveUnlockHash(tx, sfo.UnlockHash, txid)
+					//dbRemoveUnlockHash(tx, sfo.UnlockHash, txid)
 				}
 			}
 
@@ -144,10 +144,10 @@ func (e *Explorer) ProcessConsensusChange(cc modules.ConsensusChange) {
 			dbAddBlockTarget(tx, bid, target)
 
 			// Catalog the new miner payouts.
-			for j, payout := range block.MinerPayouts {
+			for j, _ := range block.MinerPayouts {
 				scoid := block.MinerPayoutID(uint64(j))
 				dbAddSiacoinOutputID(tx, scoid, tbid)
-				dbAddUnlockHash(tx, payout.UnlockHash, tbid)
+				//dbAddUnlockHash(tx, payout.UnlockHash, tbid)
 			}
 
 			// Update cumulative stats for applied transactions.
@@ -158,58 +158,58 @@ func (e *Explorer) ProcessConsensusChange(cc modules.ConsensusChange) {
 
 				for _, sci := range txn.SiacoinInputs {
 					dbAddSiacoinOutputID(tx, sci.ParentID, txid)
-					dbAddUnlockHash(tx, sci.UnlockConditions.UnlockHash(), txid)
+					//dbAddUnlockHash(tx, sci.UnlockConditions.UnlockHash(), txid)
 				}
-				for j, sco := range txn.SiacoinOutputs {
+				for j, _ := range txn.SiacoinOutputs {
 					scoid := txn.SiacoinOutputID(uint64(j))
 					dbAddSiacoinOutputID(tx, scoid, txid)
-					dbAddUnlockHash(tx, sco.UnlockHash, txid)
+					//dbAddUnlockHash(tx, sco.UnlockHash, txid)
 				}
 				for k, fc := range txn.FileContracts {
 					fcid := txn.FileContractID(uint64(k))
 					dbAddFileContractID(tx, fcid, txid)
-					dbAddUnlockHash(tx, fc.UnlockHash, txid)
+					//dbAddUnlockHash(tx, fc.UnlockHash, txid)
 					dbAddFileContract(tx, fcid, fc)
-					for l, sco := range fc.ValidProofOutputs {
+					for l, _ := range fc.ValidProofOutputs {
 						scoid := fcid.StorageProofOutputID(types.ProofValid, uint64(l))
 						dbAddSiacoinOutputID(tx, scoid, txid)
-						dbAddUnlockHash(tx, sco.UnlockHash, txid)
+						//dbAddUnlockHash(tx, sco.UnlockHash, txid)
 					}
-					for l, sco := range fc.MissedProofOutputs {
+					for l, _ := range fc.MissedProofOutputs {
 						scoid := fcid.StorageProofOutputID(types.ProofMissed, uint64(l))
 						dbAddSiacoinOutputID(tx, scoid, txid)
-						dbAddUnlockHash(tx, sco.UnlockHash, txid)
+						//dbAddUnlockHash(tx, sco.UnlockHash, txid)
 					}
 				}
 				for _, fcr := range txn.FileContractRevisions {
 					dbAddFileContractID(tx, fcr.ParentID, txid)
-					dbAddUnlockHash(tx, fcr.UnlockConditions.UnlockHash(), txid)
-					dbAddUnlockHash(tx, fcr.NewUnlockHash, txid)
-					for l, sco := range fcr.NewValidProofOutputs {
+					//dbAddUnlockHash(tx, fcr.UnlockConditions.UnlockHash(), txid)
+					//dbAddUnlockHash(tx, fcr.NewUnlockHash, txid)
+					for l, _ := range fcr.NewValidProofOutputs {
 						scoid := fcr.ParentID.StorageProofOutputID(types.ProofValid, uint64(l))
 						dbAddSiacoinOutputID(tx, scoid, txid)
-						dbAddUnlockHash(tx, sco.UnlockHash, txid)
+						//dbAddUnlockHash(tx, sco.UnlockHash, txid)
 					}
-					for l, sco := range fcr.NewMissedProofOutputs {
+					for l, _ := range fcr.NewMissedProofOutputs {
 						scoid := fcr.ParentID.StorageProofOutputID(types.ProofMissed, uint64(l))
 						dbAddSiacoinOutputID(tx, scoid, txid)
-						dbAddUnlockHash(tx, sco.UnlockHash, txid)
+						//dbAddUnlockHash(tx, sco.UnlockHash, txid)
 					}
 					dbAddFileContractRevision(tx, fcr.ParentID, fcr)
 				}
 				for _, sp := range txn.StorageProofs {
 					dbAddFileContractID(tx, sp.ParentID, txid)
-					dbAddStorageProof(tx, sp.ParentID, sp)
+					//dbAddStorageProof(tx, sp.ParentID, sp)
 				}
 				for _, sfi := range txn.SiafundInputs {
 					dbAddSiafundOutputID(tx, sfi.ParentID, txid)
-					dbAddUnlockHash(tx, sfi.UnlockConditions.UnlockHash(), txid)
-					dbAddUnlockHash(tx, sfi.ClaimUnlockHash, txid)
+					//dbAddUnlockHash(tx, sfi.UnlockConditions.UnlockHash(), txid)
+					//dbAddUnlockHash(tx, sfi.ClaimUnlockHash, txid)
 				}
-				for k, sfo := range txn.SiafundOutputs {
+				for k, _ := range txn.SiafundOutputs {
 					sfoid := txn.SiafundOutputID(uint64(k))
 					dbAddSiafundOutputID(tx, sfoid, txid)
-					dbAddUnlockHash(tx, sfo.UnlockHash, txid)
+					//dbAddUnlockHash(tx, sfo.UnlockHash, txid)
 				}
 			}
 
@@ -533,7 +533,7 @@ func dbAddGenesisBlock(tx *bolt.Tx) {
 	for i, sfo := range types.GenesisSiafundAllocation {
 		sfoid := types.GenesisBlock.Transactions[0].SiafundOutputID(uint64(i))
 		dbAddSiafundOutputID(tx, sfoid, txid)
-		dbAddUnlockHash(tx, sfo.UnlockHash, txid)
+		//dbAddUnlockHash(tx, sfo.UnlockHash, txid)
 		dbAddSiafundOutput(tx, sfoid, sfo)
 	}
 	dbAddBlockFacts(tx, blockFacts{

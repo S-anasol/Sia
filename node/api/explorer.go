@@ -21,7 +21,7 @@ type (
 		Transactions   []ExplorerTransaction   `json:"transactions"`
 		RawBlock       types.Block             `json:"rawblock"`
 
-		modules.BlockFacts
+		//modules.BlockFacts
 	}
 
 	// ExplorerTransaction is a transcation with some extra information such as
@@ -183,17 +183,17 @@ func (api *API) buildExplorerBlock(height types.BlockHeight, block types.Block) 
 		etxns = append(etxns, api.buildExplorerTransaction(height, block.ID(), txn))
 	}
 
-	facts, exists := api.explorer.BlockFacts(height)
-	if build.DEBUG && !exists {
-		panic("incorrect request to buildExplorerBlock - block does not exist")
-	}
+	//facts, exists := api.explorer.BlockFacts(height)
+	//if build.DEBUG && !exists {
+	//	panic("incorrect request to buildExplorerBlock - block does not exist")
+	//}
 
 	return ExplorerBlock{
 		MinerPayoutIDs: mpoids,
 		Transactions:   etxns,
 		RawBlock:       block,
 
-		BlockFacts: facts,
+		//BlockFacts: facts,
 	}
 }
 
